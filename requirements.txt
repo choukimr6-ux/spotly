@@ -1,0 +1,16 @@
+numpy
+pychromaprint   # optional: only used if the native libchromaprint library is present
+pandas
+streamlit
+imageio-ffmpeg  # bundled static FFmpeg binary, used when ffmpeg is not on PATH
+pytest
+requests>=2.31.0
+streamlink>=6.5.0
+reportlab>=4.0.0
+fastapi          # web app (kihc/app/api_server.py); uvicorn + jinja2 already come with streamlit
+uvicorn
+httpx2           # FastAPI/Starlette TestClient (tests)
+faster-whisper>=1.1.0  # optional: speech-to-text of discovered assets (separate process; CPU int8)
+rapidfuzz>=3.0  # token_set_ratio brand matching (optional: difflib fallback)
+arabic-reshaper   # Arabic PDF shaping
+python-bidi       # Arabic bidi layout

@@ -1,0 +1,1 @@
+"""Channel-specific stream acquisition."""

@@ -1,0 +1,19 @@
+# KIHC dashboard theme (read when Streamlit is launched from the project root).
+# Base palette lives here so every native widget is themed; kihc/app/theme.py adds the
+# bento cards, gradients, pills and tab styling on top.
+
+[theme]
+base = "light"
+primaryColor = "#10B981"
+backgroundColor = "#F4F7F6"
+secondaryBackgroundColor = "#EEF3F2"
+textColor = "#111827"
+borderColor = "#E5EBEA"
+baseRadius = "12px"
+
+[theme.sidebar]
+primaryColor = "#10B981"
+backgroundColor = "#072A27"
+secondaryBackgroundColor = "#0E3B37"
+textColor = "#E8F3F1"
+borderColor = "#1C4A45"

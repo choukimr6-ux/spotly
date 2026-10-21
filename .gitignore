@@ -1,0 +1,15 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+kihc/data/channel_overrides.json
+kihc/data/*.lock
+kihc/data/*.db*
+evidence/
+logs/
+# large / runtime artefacts (not source): model weights, DB backups, runtime state, caches
+kihc/data/models/
+kihc/data/backups/
+kihc/data/state/
+kihc/data/iptv_cache/
+kihc/data/discovered_ads/

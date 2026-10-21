@@ -1,0 +1,1 @@
+{"contract_id": "CTR-2026-DJZ-002", "brand_name": "Djezzy", "channel_id": "El-Heddaf TV", "booked_position": "RUN_OF_BREAK", "separation_window_seconds": 180, "net_rate_per_second": 10.0, "demotion_penalty_pct": 0.3, "separation_breach_penalty_pct": 1.0, "valid_from": "2026-10-01", "valid_to": "2026-10-31"}

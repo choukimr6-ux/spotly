@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "version": 1,
+    "currency": "DZD",
+    "base_spot_seconds": 30,
+    "timezone": "Algeria time (CET, UTC+1, no DST)",
+    "status": "ILLUSTRATIVE",
+    "status_note": "Placeholder figures for demonstration. They are NOT published or contracted Algerian tariffs. Replace dayparts/rates per channel with your official rate cards (tarifs plaquette) and set status to VERIFIED.",
+    "daypart_rule": "A spot is priced by the daypart containing its start time. 'end' is exclusive; a daypart whose end is earlier than its start wraps past midnight.",
+    "duration_rule": "Billed on the creative's nominal length: cost = rate * spot_seconds / base_spot_seconds."
+  },
+  "defaults": {
+    "agency_discount": 0.30,
+    "rate_multiplier": 1.0,
+    "dayparts": [
+      {"name": "Prime Time", "start": "19:30", "end": "23:01", "rate": 220000},
+      {"name": "Daytime", "start": "12:00", "end": "19:30", "rate": 90000},
+      {"name": "Off-Peak / Late Night", "start": "23:01", "end": "12:00", "rate": 45000}
+    ],
+    "position_surcharges": {"FIRST": 0.20, "LAST": 0.15, "ADJACENCY": 0.10}
+  },
+  "channels": {
+    "El-Heddaf TV": {"rate_multiplier": 1.0},
+    "Echorouk TV": {"rate_multiplier": 1.0},
+    "Ennahar TV": {"rate_multiplier": 1.0},
+    "El Bilad TV": {"rate_multiplier": 1.0}
+  },
+  "seasons": [
+    {"name": "Ramadan 2026", "start": "2026-02-18", "end": "2026-03-19", "multiplier": 2.5,
+     "note": "Approximate dates (moon sighting); confirm against the official announcement."},
+    {"name": "Ramadan 2027", "start": "2027-02-08", "end": "2027-03-09", "multiplier": 2.5,
+     "note": "Approximate dates (moon sighting); confirm against the official announcement."}
+  ],
+  "contracts": [],
+  "_contracts_example": [
+    {"brand": "Atlas Mobile", "campaign": "*", "booked_position": "FIRST", "adjacency": false,
+     "agency_discount": 0.30, "note": "booked_position: FIRST | LAST | ANY. '*' matches every campaign of the brand."}
+  ]
+}

@@ -258,6 +258,10 @@ MIGRATIONS = [
     ("ad_occurrences", "broadcast_start_cet", "TEXT"),   # ISO CET: ingest start + mcr_drift_delta_seconds
     ("ad_occurrences", "broadcast_end_cet", "TEXT"),
     ("ad_occurrences", "mcr_drift_delta_seconds", "REAL"),   # broadcast time - ingest time (< 0: broadcaster clock is earlier)
+    # Phase 29: the SHA-256 of the 11 025 Hz audio clip written at confirmation, chained into verification_hash (NULL = the
+    # row was sealed before clips were persisted, or no audio was buffered); and which process owns a channel-status row
+    ("ad_occurrences", "seal_clip_sha256", "TEXT"),
+    ("service_channel_status", "owner_pid", "INTEGER"),
 ]
 AD_TYPES = ("self", "competitor")
 

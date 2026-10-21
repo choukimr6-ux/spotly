@@ -21,6 +21,7 @@ from kihc.config import DEFAULT_DB_PATH, DISCOVERED_DIR, EVIDENCE_DIR
 from kihc.core.discovery import DiscoveryEngine
 from kihc.core.discovery_worker import DiscoveryWorker
 from kihc.core.reference_worker import ReferenceDiscoveryWorker
+from kihc.ingest.fleet import channel_slug
 from kihc.service.headless_runner import (ChannelSpec, ServiceAlreadyRunning, Supervisor,
                                           resolve_channel_arg)
 from kihc.service.lock import service_paths
@@ -72,15 +73,39 @@ def pilot_channel(channel: str) -> tuple[ChannelSpec, dict]:
     return resolve_channel_arg(channel), dict(backoff_base=5.0, backoff_factor=3.0, backoff_max=30.0)
 
 
+def split_channels(channel: str) -> list[str]:
+    """'a,b,c' -> ['a', 'b', 'c']; the token '@overrides' expands to every dedicated feed in channel_overrides.json."""
+    out: list[str] = []
+    if "=" in str(channel):                           # 'Name=URL' may legitimately contain commas
+        return [str(channel).strip()]
+    for tok in (t.strip() for t in str(channel).split(",")):
+        if tok == "@overrides":
+            out += [k for k in iptv_manager._overrides() if k not in out]
+        elif tok and tok not in out:
+            out.append(tok)
+    return out
+
+
 def build_supervisor(channel: str, db_path, *, history_hours: float = 4.0, gc_every: float = 1800.0,
                      tick: float = 5.0, discovery_kwargs: dict | None = None, worker_kwargs: dict | None = None,
-                     packshot=None, reference=None):
-    spec, wkw = pilot_channel(channel)
-    wkw.update(worker_kwargs or {})
+                     packshot=None, reference=None, fleet="default"):
+    """`channel` may name several channels ('a,b,c' / '@overrides'): one supervisor, one worker + discovery engine each.
+    `fleet`: the shared MultiStreamManager ('default' = the production engine, None = a private FFmpeg per worker)."""
+    chosen = [pilot_channel(c) for c in split_channels(channel)]
+    if not chosen:
+        raise ValueError("no channels to monitor")
+    specs = [s for s, _ in chosen]
+    spec, per_channel_kw = specs[0], {s.name: dict(kw, **(worker_kwargs or {})) for s, kw in chosen}
+    if fleet == "default":
+        from kihc.service.headless_runner import default_fleet
+        fleet = default_fleet()
     dkw = dict(history_hours=history_hours, **(discovery_kwargs or {}))
     engines = {}                                      # one discovery engine per channel for the pilot's lifetime
 
     def factory(s: ChannelSpec):
+        wkw = dict(per_channel_kw[s.name])
+        if fleet is not None:                         # Phase 29: the channel's audio comes from the shared manager
+            wkw.update(fleet=fleet, channel_id=s.key or channel_slug(s.name))
         engine = engines.get(s.name)
         if engine is None:
             engine = engines[s.name] = DiscoveryEngine(s.name, db_path, **dkw)
@@ -98,8 +123,8 @@ def build_supervisor(channel: str, db_path, *, history_hours: float = 4.0, gc_ev
         if packshot is not None:
             packshot.attach(engine)
         return w
-    sup = Supervisor([spec], db_path, tick=tick, freeze_after=20.0, connect_timeout=45.0, gc_every=gc_every,
-                     worker_factory=factory)
+    sup = Supervisor(specs, db_path, tick=tick, freeze_after=20.0, connect_timeout=45.0, gc_every=gc_every,
+                     worker_factory=factory, fleet=fleet)
     sup.discovery_engines = engines
     return sup, spec
 
@@ -223,7 +248,8 @@ def run_pilot(channel: str = "elheddaf", port: int = 8502, host: str = "127.0.0.
             log.warning("startup de-duplication skipped: %s", exc)
     threading.Thread(target=startup_dedupe, name="kihc-dedupe", daemon=True).start()
     grabber = None
-    web_feed = channel.strip().casefold() in ELHEDDAF_ALIASES and not iptv_manager.override_url("el_heddaf_tv")
+    web_feed = (any(c.casefold() in ELHEDDAF_ALIASES for c in split_channels(channel))
+                and not iptv_manager.override_url("el_heddaf_tv"))
     if packshots and web_feed:   # only feed with a verified video rendition
         grabber = PackshotGrabber(db_path, heddaf.AUDIO_HLS, heddaf.VIDEO_HLS, DISCOVERED_DIR).start()
     frame_ingest = None
@@ -234,13 +260,14 @@ def run_pilot(channel: str = "elheddaf", port: int = 8502, host: str = "127.0.0.
     reference = None
     if reference_matcher:
         from kihc.analytics.reference_matcher import ReferenceMatcher, make_packshot_frame_grabber
-        reference = ReferenceMatcher(db_path, frame_grabber=make_packshot_frame_grabber(grabber, db_path) if grabber else None)
+        reference = ReferenceMatcher(db_path, frame_grabber=make_packshot_frame_grabber(grabber, db_path) if grabber else None,
+                                    evidence_dir=EVIDENCE_DIR)       # confirmed-airing clips are persisted here
         log.info("reference matcher ON: %d signature(s), %.2f MB index", len(reference.index),
                  reference.index.memory_bytes() / 2 ** 20)
     sup, spec = build_supervisor(channel, db_path, history_hours=history_hours, gc_every=gc_every, packshot=grabber,
                                  reference=reference)
     if frame_ingest is not None:
-        sup.frame_ingests[spec.name] = frame_ingest           # video telemetry rides on the channel status
+        sup.frame_ingests[heddaf.CHANNEL_NAME] = frame_ingest     # video telemetry rides on the channel status
     try:
         sup.start()                                   # takes the single-instance lock: fail fast
     except ServiceAlreadyRunning as exc:

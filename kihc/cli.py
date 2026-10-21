@@ -109,7 +109,10 @@ def main(argv=None):
     pst.add_argument("--db", default=argparse.SUPPRESS)
     pst.add_argument("--wait", type=float, default=30.0, help="seconds to wait for confirmation")
     pp2 = sub.add_parser("pilot-run", help="background ingest + discovery and the web dashboard in one process")
-    pp2.add_argument("--channel", default="elheddaf", help="elheddaf (direct web feed), a national key, or 'Name=URL'")
+    pp2.add_argument("--channel", default="elheddaf",
+                     help="elheddaf (direct web feed), a national key, or 'Name=URL'; several: 'a,b,c'; "
+                          "'@overrides' = every dedicated feed in data/channel_overrides.json. All channels run on one "
+                          "MultiStreamManager (KIHC_INGEST_ENGINE=legacy: a private FFmpeg per channel)")
     pp2.add_argument("--port", type=int, default=8502)
     pp2.add_argument("--host", default="127.0.0.1")
     pp2.add_argument("--history-hours", type=float, default=4.0, help="discovery look-back window")

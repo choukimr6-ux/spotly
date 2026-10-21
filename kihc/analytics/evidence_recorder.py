@@ -33,12 +33,14 @@ log = logging.getLogger(__name__)
 
 PAD_SECONDS = 3.0                 # pre-roll and post-roll
 CLIP_RATE = LIVE_SAMPLE_RATE // 2   # 11 025 Hz mono 16-bit (~22 kB/s): plenty for speech/jingle evidence
-RING_SECONDS = 60.0               # circular scratch buffer per channel (~1.3 MB at CLIP_RATE)
+RING_SECONDS = 75.0               # circular scratch buffer per channel (~1.7 MB at CLIP_RATE): a 55 s spot + both 3 s pads + confirm lag
 STASH_MAX = 48                    # candidate clips held in memory across channels (~36 s each, ~0.8 MB)
 STASH_TTL = 3600.0
 JOB_GIVE_UP = 30.0                # cut a partial candidate if the post-roll never arrives within this long
 TOLERANCE = 0.25                  # seconds of missing audio tolerated at either edge of a clip
 BREACH_DIR = "breaches"
+AIRING_DIR = "airings"            # Phase 29: one clip per confirmed airing, written at confirmation and sealed into its hash
+MIN_AIRING_COVERAGE = 0.5         # a clip is persisted only if at least this share of the airing itself was buffered
 
 
 class EvidenceUnavailable(RuntimeError):
@@ -77,6 +79,13 @@ class ChannelRing:
     def end(self) -> float | None:
         with self._lock:
             return self._chunks[-1][0] + self._chunks[-1][1].size / CLIP_RATE if self._chunks else None
+
+    def span(self) -> tuple[float, float] | None:
+        """(first buffered epoch, end of the newest buffered audio), or None while the ring is empty."""
+        with self._lock:
+            if not self._chunks:
+                return None
+            return self._chunks[0][0], self._chunks[-1][0] + self._chunks[-1][1].size / CLIP_RATE
 
     def slice(self, t0: float, t1: float) -> tuple[np.ndarray, float]:
         """Samples for [t0, t1) at CLIP_RATE (silence where the ring has a gap) and the seconds actually covered."""
@@ -216,6 +225,89 @@ def capture_breach_evidence(channel_id: str, start_time_cet, end_time_cet, breac
                 covered_seconds=round(covered, 3), complete=covered >= total - 2 * TOLERANCE)
 
 
+def snapshot(channel: str, t0: float, t1: float) -> ChannelRing | None:
+    """Copy of the buffered audio for [t0, t1] as a standalone ring (None when nothing is buffered).
+
+    The BER matcher confirms an airing about one ad length AFTER it ended, by when the scratch ring has scrolled past
+    its start; it snapshots the raw audio the moment a candidate first appears and hands the snapshot to
+    `persist_airing_clip(fallback=...)` at confirmation."""
+    with _LOCK:
+        ring = _RINGS.get(channel)
+    span = ring.span() if ring is not None else None
+    if span is None:
+        return None
+    a, b = max(t0, span[0]), min(t1, span[1])
+    if b <= a:
+        return None
+    pcm, _ = ring.slice(a, b)
+    out = ChannelRing(seconds=(b - a) + 1.0)
+    out._chunks.append((a, pcm))
+    return out
+
+
+def persist_airing_clip(channel: str, start: float, end: float, *, key, evidence_dir=None,
+                        ring: ChannelRing | None = None, fallback: ChannelRing | None = None) -> dict | None:
+    """Write the 11 025 Hz WAV of a just-confirmed airing (3.0 s pre-roll .. 3.0 s post-roll) and hash the file.
+
+    Called synchronously by whoever confirms the airing, BEFORE the row is inserted, so the clip's SHA-256 can be chained into
+    the airing's verification hash and the audio no longer depends on a scratch buffer that dies with the process. The
+    window is clipped to what is buffered (never padded with fabricated silence at either end); gaps inside it are silence
+    and are reported through `complete` / `covered_seconds`. Defensive: any failure returns None and the caller seals the
+    airing without a clip, exactly as before.
+    -> dict(path=<relative to the evidence dir>, sha256, clip_start_epoch, clip_seconds, covered_seconds, complete) | None
+    """
+    try:
+        start, end = float(start), float(end)
+        with _LOCK:
+            ring = ring or _RINGS.get(channel)
+        if end <= start:
+            return None
+        want0, want1 = start - PAD_SECONDS, end + PAD_SECONDS
+
+        def cut(r):
+            span = r.span() if r is not None else None
+            if span is None:
+                return None
+            t0, t1 = max(want0, span[0]), min(want1, span[1])
+            if t1 <= t0:
+                return None
+            pcm, covered = r.slice(t0, t1)
+            return t0, t1, pcm, covered, max(0.0, min(end, t1) - max(start, t0))
+
+        best = cut(ring)
+        if (best is None or best[4] < 0.98 * (end - start)) and fallback is not None:
+            alt = cut(fallback)                       # the live ring scrolled past the start: use the snapshot
+            if alt is not None and (best is None or alt[4] > best[4]):
+                best = alt
+        if best is None:
+            return None
+        t0, t1, pcm, covered, in_airing = best
+        if in_airing < MIN_AIRING_COVERAGE * (end - start) or covered < MIN_AIRING_COVERAGE * (end - start):
+            log.info("no airing clip for %s @ %.1f: only %.1f s of the %.1f s airing buffered", channel, start, in_airing,
+                     end - start)
+            return None
+        root = Path(evidence_dir or EVIDENCE_DIR)
+        folder = root / AIRING_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.fromtimestamp(start, ALGERIA_TZ).strftime("%Y%m%dT%H%M%S")
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", channel)[:40].strip("_")
+        tag = re.sub(r"[^A-Za-z0-9]+", "_", str(key))[:40].strip("_") or "x"
+        name = f"{slug}_{stamp}{int(round(start * 1000)) % 1000:03d}_{tag}.wav"
+        target = folder / name
+        created = not target.exists()
+        if created:                                  # a sealed clip is immutable: an existing file is never rewritten
+            write_wav(target, pcm)
+        # relative to the evidence dir (portable) when that is the configured one; a custom root is stored absolute
+        stored = f"{AIRING_DIR}/{name}" if root.resolve() == Path(EVIDENCE_DIR).resolve() else str(target.resolve())
+        return dict(path=stored, sha256=sha256_file(target), created=created, clip_start_epoch=t0,
+                    clip_seconds=round(len(pcm) / CLIP_RATE, 3), covered_seconds=round(covered, 3),
+                    complete=bool(t0 <= want0 + TOLERANCE and t1 >= want1 - TOLERANCE
+                                  and covered >= (t1 - t0) - 2 * TOLERANCE))
+    except Exception:                                                  # evidence must never break a confirmation
+        log.exception("airing clip failed for %s @ %s", channel, start)
+        return None
+
+
 # ------------------------------------------------------------------------------------------ persistence
 def bind_evidence(db_path, occurrence_id: int, ev: dict, breach_type: str, contract_id: str | None = None) -> None:
     """Store path + SHA-256 on the occurrence and append a hash-chained audit entry (WAL, one transaction)."""
@@ -236,10 +328,10 @@ def evidence_for(db_path, occurrence_id: int) -> dict | None:
 
 
 def resolve_path(rel: str, evidence_dir=None) -> Path:
-    """Absolute clip path, refusing anything that escapes <evidence>/breaches/."""
-    base = (Path(evidence_dir or EVIDENCE_DIR) / BREACH_DIR).resolve()
-    p = (Path(evidence_dir or EVIDENCE_DIR) / rel).resolve()
-    if base not in p.parents:
+    """Absolute clip path, refusing anything that escapes <evidence>/breaches/ or <evidence>/airings/."""
+    root = Path(evidence_dir or EVIDENCE_DIR)
+    p = (root / rel).resolve()          # an absolute `rel` replaces `root`: the check below still confines it
+    if not any((root / d).resolve() in p.parents for d in (BREACH_DIR, AIRING_DIR)):
         raise ValueError("evidence path outside the breach folder")
     return p
 

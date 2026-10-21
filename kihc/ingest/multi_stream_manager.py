@@ -151,18 +151,27 @@ def backoff_delay(attempt: int, base: float, cap: float, rng=random) -> float:
     return nominal * (0.5 + 0.5 * rng.random())
 
 
-def ffmpeg_command(url: str, *, stall_timeout: float, live_start_index: int, ffmpeg: str | None = None) -> list[str]:
-    """Raw audio only: no video, subtitles or data streams; 16 kHz / 16-bit / mono PCM on stdout."""
+def ffmpeg_command(url: str, *, stall_timeout: float, live_start_index: int, ffmpeg: str | None = None,
+                   sample_rate: int = PCM_RATE, input_args: list[str] | None = None, user_agent: str | None = None,
+                   referer: str | None = None, loglevel: str = "error") -> list[str]:
+    """Raw audio only: no video, subtitles or data streams; mono 16-bit PCM on stdout (16 kHz unless `sample_rate`).
+
+    `input_args` replaces the default http input options (a feed that needs its own reconnect flags); `loglevel` may be raised
+    to "level+info" by a caller that reads FFmpeg's "Opening ..." lines (MCR clock calibration)."""
     if ffmpeg is None:
         from kihc.core.audio import ffmpeg_exe
         ffmpeg = ffmpeg_exe()
-    cmd = [ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-loglevel", "error", "-threads", "1"]
+    cmd = [ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-loglevel", loglevel, "-threads", "1"]
     if re.match(r"https?://", url):
-        cmd += ["-probesize", "262144", "-analyzeduration", "1000000", "-max_delay", "500000",   # capped probe memory
-                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
-                "-reconnect_delay_max", "5", "-rw_timeout", str(int(stall_timeout * 1e6)),
-                "-live_start_index", str(live_start_index)]       # input options: before -i
-    cmd += ["-i", url, "-vn", "-sn", "-dn", "-acodec", "pcm_s16le", "-ar", str(PCM_RATE), "-ac", "1",
+        cmd += input_args or ["-probesize", "262144", "-analyzeduration", "1000000", "-max_delay", "500000",   # capped probe memory
+                              "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
+                              "-reconnect_delay_max", "5", "-rw_timeout", str(int(stall_timeout * 1e6)),
+                              "-live_start_index", str(live_start_index)]       # input options: before -i
+        if user_agent:
+            cmd += ["-user_agent", user_agent]
+        if referer:
+            cmd += ["-referer", referer]
+    cmd += ["-i", url, "-vn", "-sn", "-dn", "-acodec", "pcm_s16le", "-ar", str(sample_rate), "-ac", "1",
             "-f", "s16le", "pipe:1"]
     return cmd
 
@@ -253,10 +262,16 @@ class MultiStreamManager:
         self.resolver = resolver or DefaultResolver()
         self.command_builder = command_builder or (
             lambda url, ch: ffmpeg_command(url, stall_timeout=self.cfg["stall_timeout_sec"],
-                                           live_start_index=self.cfg["live_start_index"]))
+                                           live_start_index=self.cfg["live_start_index"],
+                                           sample_rate=int(self.cfg["sample_rate"])))
         self.rng = rng or random.Random()
         self.queue = SegmentQueue(int(self.cfg["queue_max_segments"]))
         self.stats = {cid: _Stat() for cid in catalogue.channels}
+        # Per-channel consumers (Phase 29). A channel with a listener hands its audio and connection events straight to it
+        # (callbacks run on the ingest loop thread and must never block); a channel without one feeds the shared queue.
+        # Listener protocol, every method optional: on_attempt(), on_connect(url), on_segment(seg), on_stderr(line) -> bool
+        # (True = consumed), on_disconnect(error, retry_in_s).
+        self._listeners: dict[str, object] = {}
         self._initial = [c.id for c in catalogue.select(pools, only)]
         self._tasks: dict[str, asyncio.Task] = {}
         self._procs: dict[str, object] = {}
@@ -297,6 +312,32 @@ class MultiStreamManager:
         async def run():
             return fn()
         return asyncio.run_coroutine_threadsafe(run(), self._loop).result(10)
+
+    # ---- listeners (thread-safe: a dict assignment)
+    def set_listener(self, channel_id: str, listener) -> None:
+        self._listeners[channel_id] = listener
+
+    def clear_listener(self, channel_id: str, listener=None) -> bool:
+        """Remove the listener (only if it is still `listener`, when given). -> True if one was removed."""
+        if listener is not None and self._listeners.get(channel_id) is not listener:
+            return False
+        return self._listeners.pop(channel_id, None) is not None
+
+    def _notify(self, channel_id: str, event: str, *args):
+        """Call listener.<event>(*args); a listener bug must never take a channel's supervision down."""
+        fn = getattr(self._listeners.get(channel_id), event, None)
+        if fn is None:
+            return None
+        try:
+            return fn(*args)
+        except Exception:
+            log.exception("%s: listener %s failed", channel_id, event)
+            return None
+
+    def register_channel(self, profile: ChannelProfile) -> None:
+        """Add a channel to the catalogue at run time (stand-by until activate())."""
+        self.catalogue.channels[profile.id] = profile
+        self.stats.setdefault(profile.id, _Stat())
 
     # ---- pool control (thread-safe)
     def active(self) -> list[str]:
@@ -342,6 +383,7 @@ class MultiStreamManager:
         try:
             while True:
                 st.state = "resolving"
+                self._notify(ch.id, "on_attempt")
                 try:
                     url = await asyncio.wait_for(loop.run_in_executor(None, self.resolver, ch),
                                                  cfg["resolve_timeout_sec"])
@@ -349,7 +391,9 @@ class MultiStreamManager:
                     raise
                 except Exception as exc:
                     st.state, st.last_error, st.failures = "unresolved", f"{type(exc).__name__}: {exc}", st.failures + 1
-                    await self._sleep(st, backoff_delay(0, cfg["unresolved_retry_sec"], cfg["unresolved_retry_sec"], self.rng))
+                    wait = backoff_delay(0, cfg["unresolved_retry_sec"], cfg["unresolved_retry_sec"], self.rng)
+                    self._notify(ch.id, "on_disconnect", st.last_error, wait)
+                    await self._sleep(st, wait)
                     continue
                 started = time.monotonic()
                 try:
@@ -367,6 +411,7 @@ class MultiStreamManager:
                 attempt += 1
                 st.state = "backoff"
                 log.warning("%s: %s - retry in %.1f s", ch.id, st.last_error, delay)
+                self._notify(ch.id, "on_disconnect", st.last_error, delay)
                 await self._sleep(st, delay)
         finally:
             if self._tasks.get(ch.id) is asyncio.current_task():
@@ -390,15 +435,23 @@ class MultiStreamManager:
                                                     limit=seg_bytes * 2, **kw)
         st.pid, st.connects = proc.pid, st.connects + 1
         err_tail = collections.deque(maxlen=3)
+        self._notify(ch.id, "on_connect", url)
 
         async def drain():
             while line := await proc.stderr.readline():
-                err_tail.append(line.decode(errors="replace").strip()[:200])
+                text = line.decode(errors="replace").strip()[:200]
+                if self._notify(ch.id, "on_stderr", text):     # consumed by the listener (e.g. the clock probe's info lines)
+                    continue
+                err_tail.append(text)
         drain_task = asyncio.get_running_loop().create_task(drain())
         n = 0
         anchor = 0.0
         try:
             while True:
+                lst = self._listeners.get(ch.id)
+                while lst is not None and getattr(lst, "congested", None) and lst.congested():
+                    await asyncio.sleep(0.02)       # a per-channel consumer is behind: stop reading, FFmpeg's pipe then blocks
+                    lst = self._listeners.get(ch.id)
                 try:
                     pcm = await asyncio.wait_for(proc.stdout.readexactly(seg_bytes), cfg["stall_timeout_sec"])
                 except asyncio.IncompleteReadError:
@@ -415,7 +468,11 @@ class MultiStreamManager:
                 if now - (anchor + n * dur) > 5.0:         # fell behind real time (consumer-side stall): re-anchor
                     anchor, n, wall0 = now - dur, 0, now - dur
                 st.seq += 1
-                self.queue.put(AudioSegment(ch.id, st.seq, wall0, sr, pcm))
+                seg = AudioSegment(ch.id, st.seq, wall0, sr, pcm)
+                if ch.id in self._listeners:
+                    self._notify(ch.id, "on_segment", seg)
+                else:
+                    self.queue.put(seg)
                 n += 1
                 st.segments, st.bytes, st.last_segment_at = st.segments + 1, st.bytes + len(pcm), now
         finally:
@@ -438,7 +495,7 @@ class MultiStreamManager:
     def status(self) -> dict:
         now = time.time()
         out = {}
-        for cid, ch in self.catalogue.channels.items():
+        for cid, ch in list(self.catalogue.channels.items()):       # channels may be registered while this runs
             s = self.stats[cid]
             out[cid] = dict(name=ch.name, tier=ch.tier, enabled=ch.enabled, state=s.state,
                             active=cid in self._tasks, segments=s.segments, connects=s.connects, failures=s.failures,

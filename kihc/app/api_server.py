@@ -170,6 +170,8 @@ def _slim_status(name: str, s: dict, source: str, stream_ref=None, restarts=None
             "buffered_seconds", "received_seconds", "detections", "references", "connect_attempts",
             "next_retry_at", "last_error")
     out = {k: s.get(k) for k in keys}
+    # Phase 29 telemetry truth: how old the supervisor's last report is, and whether it is still a live channel at all
+    out.update(link=s.get("link", "live"), data_age_s=s.get("data_age_s"), offline=bool(s.get("offline")))
     out.update(feed_label=s.get("feed_label") or "", discovery=s.get("discovery"), video=s.get("video"))
     out.update(name=name, source=source, restarts=restarts,
                level_history=[lvl for _, lvl in (s.get("level_history") or [])[-HISTORY_POINTS:]],
@@ -595,10 +597,12 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
         eng = None
         if engine:
             eng = {k: engine.get(k) for k in ("active", "state", "pid", "hostname", "started_at", "heartbeat_age_s",
-                                              "rss_mb", "ffmpeg_rss_mb", "restarts", "channels", "message")}
+                                              "rss_mb", "ffmpeg_rss_mb", "restarts", "channels", "message",
+                                              "live_channels", "offline_channels", "orphan_rows_ignored")}
         clocks = clock_sync.load_all(app.state.db_path)           # Phase 22: capture-vs-broadcaster offset per channel
         for c in clocks:
             c["age_s"] = round(time.time() - c["updated_epoch"], 1)
+            c["stale"] = c["age_s"] > 600.0                       # time_synchronizer.FRESH_S: no longer used to stamp airings
         return {"engine": eng, "channels": channels, "clock": clocks, "server_time": time.time()}
 
     def _channel_catalog():

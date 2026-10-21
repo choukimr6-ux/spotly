@@ -32,6 +32,7 @@ from typing import Callable
 
 from kihc.config import DATA_DIR, DEFAULT_DB_PATH, EVIDENCE_DIR
 from kihc.core.live_worker import LiveStreamWorker
+from kihc.ingest.fleet import FleetIngest, channel_slug
 from kihc.database.schema import init_db
 from kihc.service.lock import ProcessLock, service_paths
 from kihc.service.sysinfo import memory_mb
@@ -41,6 +42,36 @@ log = logging.getLogger("kihc.service")
 CONFIG_FILE = DATA_DIR / "service_channels.json"
 RAM_BUDGET_MB = 250.0
 EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_NO_CHANNELS = 0, 3, 2
+
+# Telemetry truth (Phase 29): a channel row is only as good as its age. The supervisor rewrites every row each tick (5 s).
+LIVE_FRESH_S = 15.0                  # a row this young is live
+OFFLINE_AFTER_S = 30.0               # older than this the channel is reported OFFLINE, never as its last known state
+OFFLINE_LABEL = "OFFLINE / DISCONNECTED"
+
+
+INGEST_ENGINE_ENV = "KIHC_INGEST_ENGINE"
+
+
+def default_fleet() -> FleetIngest | None:
+    """The production ingest engine: one MultiStreamManager under every channel. KIHC_INGEST_ENGINE=legacy is the escape
+    hatch back to a private FFmpeg + reader thread per worker."""
+    if os.environ.get(INGEST_ENGINE_ENV, "managed").strip().lower() == "legacy":
+        return None
+    return FleetIngest()
+
+
+def classify_link(age_s: float | None) -> str:
+    """'live' (<= 15 s), 'stale' (<= 30 s: shown, flagged) or 'offline' (anything older, or never written)."""
+    if age_s is None or age_s > OFFLINE_AFTER_S:
+        return "offline"
+    return "live" if age_s <= LIVE_FRESH_S else "stale"
+
+
+def mark_offline(ch: dict) -> dict:
+    """Replace a dead channel's last-known measurements with an explicit OFFLINE state (no phantom levels or uptime)."""
+    ch.update(state=OFFLINE_LABEL, offline=True, level_dbfs=None, peak_dbfs_10s=None, silent=False, connected_for_s=None,
+              buffered_seconds=0.0, level_history=[], next_retry_at=None)
+    return ch
 
 
 class ServiceAlreadyRunning(RuntimeError):
@@ -102,10 +133,11 @@ class Supervisor:
     def __init__(self, channels: list[ChannelSpec], db_path=None, *, tick: float = 5.0,
                  freeze_after: float = 20.0, connect_timeout: float = 45.0, gc_every: float = 3600.0,
                  evidence_dir=EVIDENCE_DIR, worker_factory: Callable[[ChannelSpec], object] | None = None,
-                 worker_kwargs: dict | None = None):
+                 worker_kwargs: dict | None = None, fleet: FleetIngest | None = None):
         if not channels:
             raise ValueError("no channels to monitor")
         self.channels = channels
+        self.fleet = fleet                # Phase 29: the shared MultiStreamManager the workers consume (None = legacy)
         self.db_path = str(db_path or DEFAULT_DB_PATH)
         self.tick_seconds, self.freeze_after, self.gc_every = tick, freeze_after, gc_every
         self.connect_timeout = connect_timeout
@@ -127,9 +159,13 @@ class Supervisor:
         self.ticks = 0
 
     # ------------------------------------------------------------ lifecycle
+    def fleet_kwargs(self, spec: ChannelSpec) -> dict:
+        """Worker kwargs that hand the channel's ingest to the shared manager (empty in legacy mode)."""
+        return dict(fleet=self.fleet, channel_id=spec.key or channel_slug(spec.name)) if self.fleet is not None else {}
+
     def _default_factory(self, spec: ChannelSpec):
         return LiveStreamWorker(spec.name, spec.source, self.db_path, headers=spec.headers,
-                                evidence_dir=self.evidence_dir, **self.worker_kwargs)
+                                evidence_dir=self.evidence_dir, **self.fleet_kwargs(spec), **self.worker_kwargs)
 
     def request_stop(self, reason: str = "requested"):
         if not self._stop.is_set():
@@ -146,6 +182,7 @@ class Supervisor:
             raise ServiceAlreadyRunning(f"another KIHC service holds {self.paths['lock']}")
         try:
             self.paths["stop"].unlink(missing_ok=True)      # stale stop request from a previous run
+            self.purge_orphan_channels()
             self.started_at = _now_iso()
             self._write_heartbeat("starting")
             for spec in self.channels:
@@ -157,6 +194,15 @@ class Supervisor:
             self._write_heartbeat("stopped", message="startup failed")
             self.lock.release()
             raise
+
+    def purge_orphan_channels(self) -> int:
+        """Delete channel-status rows no live supervisor owns. Holding the single-instance lock proves every row still in the
+        table was written by a process that is gone, so the dashboard can never be served a dead process's channels."""
+        n = []
+        self._db(lambda c: n.append(c.execute("DELETE FROM service_channel_status").rowcount))
+        if n and n[0]:
+            log.info("purged %d orphaned channel-status row(s) left by a previous process", n[0])
+        return n[0] if n else 0
 
     def run(self) -> int:
         """Blocking supervisor loop. Returns a process exit code."""
@@ -177,6 +223,8 @@ class Supervisor:
             t.start()
         for t in stoppers:
             t.join(15)
+        if self.fleet is not None:
+            self.fleet.stop()
         self._write_channels()
         self._write_heartbeat("stopped", message=f"graceful shutdown ({self.stop_reason or 'requested'})")
         log.info("service stopped (%s)", self.stop_reason or "requested")
@@ -254,12 +302,13 @@ class Supervisor:
                 except Exception:
                     log.exception("video telemetry failed")
             statuses.append(s)
-            rows.append((name, s["state"], time.time(), self.restarts.get(name, 0), json.dumps(s)))
+            rows.append((name, s["state"], time.time(), self.restarts.get(name, 0), json.dumps(s), os.getpid()))
         self._last_statuses = statuses
         self._db(lambda c: c.executemany(
-            "INSERT INTO service_channel_status (channel, state, updated_epoch, restarts, status_json) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(channel) DO UPDATE SET state=excluded.state, "
-            "updated_epoch=excluded.updated_epoch, restarts=excluded.restarts, status_json=excluded.status_json",
+            "INSERT INTO service_channel_status (channel, state, updated_epoch, restarts, status_json, owner_pid) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(channel) DO UPDATE SET state=excluded.state, "
+            "updated_epoch=excluded.updated_epoch, restarts=excluded.restarts, status_json=excluded.status_json, "
+            "owner_pid=excluded.owner_pid",
             rows))
 
     def _write_heartbeat(self, state: str, message: str = ""):
@@ -310,12 +359,27 @@ def read_service_status(db_path=None, stale_after: float | None = None) -> dict 
         return None
     hb = dict(hb)
     stale_after = stale_after or 3 * (hb["tick_seconds"] or 5.0) + 5.0
-    age = time.time() - (hb["heartbeat_epoch"] or 0)
+    now = time.time()
+    age = now - (hb["heartbeat_epoch"] or 0)
     locked = is_locked(service_paths(db_path)["lock"])
+    channel_status, orphans = [], 0
+    if hb["state"] in ("starting", "running"):
+        for c in chans:
+            ch_age = now - (c["updated_epoch"] or 0)
+            owner = c["owner_pid"] if "owner_pid" in c.keys() else None
+            # a row belongs to the live supervisor only if that process wrote it; a pre-Phase-29 row (no owner) is trusted
+            # only while it is young. Anything else is a phantom left by a dead process and is not served at all.
+            if (owner is not None and owner != hb["pid"]) or (owner is None and ch_age > OFFLINE_AFTER_S):
+                orphans += 1
+                continue
+            d = dict(name=c["channel"], restarts=c["restarts"], **json.loads(c["status_json"]))
+            d.update(data_age_s=round(ch_age, 1), link=classify_link(ch_age), updated_epoch=c["updated_epoch"], offline=False)
+            channel_status.append(mark_offline(d) if d["link"] == "offline" else d)
     hb.update(heartbeat_age_s=round(age, 1), lock_held=locked,
               active=locked and hb["state"] in ("starting", "running") and age <= stale_after,
-              channel_status=[dict(name=c["channel"], restarts=c["restarts"], **json.loads(c["status_json"]))
-                              for c in chans] if hb["state"] in ("starting", "running") else [])
+              channel_status=channel_status, orphan_rows_ignored=orphans,
+              live_channels=sum(1 for c in channel_status if c["link"] != "offline"),
+              offline_channels=sum(1 for c in channel_status if c["link"] == "offline"))
     return hb
 
 
@@ -361,7 +425,7 @@ def run_service(channel_args: list[str] | None = None, db_path=None, *, config=C
             log.error("%s", exc)
             return EXIT_NO_CHANNELS
     sup = Supervisor(specs, db_path, tick=tick, freeze_after=freeze_after, connect_timeout=connect_timeout,
-                     gc_every=gc_every)
+                     gc_every=gc_every, fleet=default_fleet())
     if os.environ.get("KIHC_FRAMES", "on").lower() not in ("off", "0", "false"):
         from kihc.stream import elheddaf_stream as heddaf
         for s in specs:                              # El-Heddaf only: the one feed with a verified video rendition

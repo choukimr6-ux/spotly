@@ -34,10 +34,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
-from kihc.core.proof import algeria_iso, compute_verification_hash
+from kihc.config import EVIDENCE_DIR
+from kihc.core.proof import algeria_iso, combine_evidence, compute_verification_hash
+from kihc.analytics import evidence_recorder
 from kihc.analytics.brand_extractor import compute_voice_ratio, is_music_dominant
 from kihc.data import reference_db as rdb
 from kihc.stream import clock_sync, time_synchronizer
@@ -833,8 +836,9 @@ class ReferenceMatcher:
 
     def __init__(self, db_path=None, *, index: ReferenceIndex | None = None, frame_grabber=None,
                  accept: float = ACCEPT_CONF, verify_floor: float = VERIFY_FLOOR, compliance: bool = True,
-                 compliance_min_interval: float = 30.0):
+                 compliance_min_interval: float = 30.0, evidence_dir=None):
         self.db_path = db_path
+        self.evidence_dir = evidence_dir          # where confirmed-airing clips are written (None = config EVIDENCE_DIR)
         self.index = index if index is not None else ReferenceIndex.from_db(db_path)
         self._version = rdb.signature_version(db_path) if index is None else None
         self.frame_grabber = frame_grabber
@@ -964,14 +968,26 @@ class ReferenceMatcher:
         c.ad_id = ad_id
         source = f"live:{channel}"
         ts_cet = algeria_iso(c.airing_start)
-        vhash = compute_verification_hash(ad_id, source, ts_cet, c.airing_end, c.nominal_duration, c.confidence, None)
+        # Phase 29: the audio is written to disk NOW and its SHA-256 is chained into the seal, so the evidence outlives the
+        # scratch ring (and a restart); an airing whose audio is not buffered is sealed without a clip, as before.
+        clip = evidence_recorder.persist_airing_clip(channel, c.airing_start, c.airing_end, key=c.asset_id,
+                                                     evidence_dir=self.evidence_dir)
+        vhash = compute_verification_hash(ad_id, source, ts_cet, c.airing_end, c.nominal_duration, c.confidence, None,
+                                          evidence_sha256=combine_evidence(None, clip["sha256"]) if clip else None)
         c.occurrence_id = rdb.commit_airing(
             self.db_path, asset_id=c.asset_id, ad_id=ad_id, source_name=source, airing_start=c.airing_start,
             airing_end=c.airing_end, duration=c.nominal_duration, confidence=c.confidence,
             algeria_timestamp=ts_cet, verification_hash=vhash,
             detected_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), status=c.status,
+            evidence_path=clip["path"] if clip else None, evidence_sha256=clip["sha256"] if clip else None,
+            seal_clip_sha256=clip["sha256"] if clip else None,
             **clock_sync.occurrence_fields(channel),
             **time_synchronizer.occurrence_fields(channel, c.airing_start, c.airing_end))
+        if c.occurrence_id is None and clip and clip["created"]:     # a duplicate airing: its fresh clip is unreferenced
+            try:                       # a custom evidence root is stored absolute: `/` then keeps it as is
+                (Path(self.evidence_dir or EVIDENCE_DIR) / clip["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
         if c.occurrence_id is None:
             c.decision = "duplicate"
             return

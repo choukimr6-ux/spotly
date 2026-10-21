@@ -50,6 +50,8 @@ class ReferenceDiscoveryWorker(DiscoveryWorker):
                  keep_legacy: bool = False, **kwargs):
         super().__init__(channel_name, stream_url, db_path, **kwargs)
         self.reference = reference or ReferenceMatcher(db_path)
+        if getattr(self.reference, "evidence_dir", None) is None:
+            self.reference.evidence_dir = self.evidence_dir      # confirmed-airing clips land beside this worker's evidence
         self.keep_legacy = keep_legacy
         self.reference_events = []
         self._dec = Decimator()

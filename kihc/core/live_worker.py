@@ -18,6 +18,7 @@ segment lengths, so capture time is later than the true on-air time by that much
 source_name is "live:<channel>"; detected_at is the UTC ISO time of confirmation.
 """
 import collections
+import hashlib
 import logging
 import re
 import subprocess
@@ -38,11 +39,12 @@ from kihc.config import (EVIDENCE_DIR, FFMPEG_LOW_MEM_ARGS, HOP_SIZE, LIVE_BACKO
                          LIVE_STALL_TIMEOUT, SAMPLE_RATE)
 from kihc.analytics import evidence_recorder, pod_boundary_detector
 from kihc.stream import clock_sync, time_synchronizer
+from kihc.core import incremental_dsp
 from kihc.core.audio import ffmpeg_exe
 from kihc.core.fingerprint import StreamingFingerprinter, fps_to_seconds
 from kihc.core.matcher import _load_refs
 from kihc.core.normalize import SILENCE_DBFS, normalize_rms, rms_dbfs
-from kihc.core.proof import algeria_iso, compute_verification_hash
+from kihc.core.proof import algeria_iso, combine_evidence, compute_verification_hash
 from kihc.database.schema import init_db
 
 log = logging.getLogger("kihc.live")
@@ -54,9 +56,7 @@ FP_FEED_SAMPLES = 5 * SAMPLE_RATE          # fingerprint in 5 s pieces to bound 
 
 
 def _lowpass(n_taps=101, cutoff=0.45 / DECIM):
-    k = np.arange(n_taps) - n_taps // 2
-    h = 2 * cutoff * np.sinc(2 * cutoff * k) * np.hamming(n_taps)
-    return (h / h.sum()).astype(np.float32)
+    return incremental_dsp.design_taps(n_taps, cutoff)
 
 
 _TAPS = _lowpass()
@@ -115,8 +115,17 @@ class LiveStreamWorker:
                  stall_timeout: float = LIVE_STALL_TIMEOUT,
                  max_connects: int | None = None,
                  backoff_factor: float = 2.0,
-                 ffmpeg_input_args: list[str] | None = None):
+                 ffmpeg_input_args: list[str] | None = None,
+                 fleet=None, channel_id: str | None = None):
         self.channel_name = channel_name
+        # Phase 29 engine unification: with a FleetIngest the channel's FFmpeg, resolver retries, stall detection and
+        # backoff are supervised by the shared MultiStreamManager and this worker only consumes its audio.
+        self._fleet = fleet
+        self._channel_id = channel_id or channel_name
+        self._inbox = None
+        self._listener = None
+        self._conn_got = 0
+        self._conn_wall = 0.0
         self.backoff_factor = backoff_factor
         # Replaces the default http input options (-rw_timeout) when given, e.g. FFmpeg reconnect flags.
         self.ffmpeg_input_args = list(ffmpeg_input_args) if ffmpeg_input_args else None
@@ -144,6 +153,12 @@ class LiveStreamWorker:
         self._ignored_ad_ids = set()      # reference ads another matcher owns (see core/reference_worker.py)
         self._captured = {}               # (ad_id, offset) -> (pcm int16, g_start, wall_start, conn_anchor)
         self._conn_anchor = (0, 0.0)      # (global sample, epoch) at start of current connection
+        # Phase 29 incremental analysis: every sample is filtered / fingerprinted once, into a rolling sub-fingerprint window
+        self._inc = None                  # IncrementalFingerprintStream of the current contiguous stretch of audio
+        self._inc_g = None                # global 22 050 Hz sample up to which audio has been consumed
+        self._fpbuf = np.zeros(0, np.uint32)   # sub-fingerprints from frame _fpbase on that the matcher still needs
+        self._fpbase = 0
+        self.dsp = dict(passes=0, samples=0, ms=0.0)   # telemetry: samples pushed through the DSP vs time spent in it
         self._proc = None
         self._stderr_tail = collections.deque(maxlen=20)
         self._threads = []
@@ -169,7 +184,11 @@ class LiveStreamWorker:
             return self
         self._stop.clear()
         self.started_at = time.time()
-        self._threads = [threading.Thread(target=self._ingest_loop, name=f"kihc-ingest-{self.channel_name}", daemon=True),
+        if self._fleet is not None:
+            from kihc.ingest.fleet import Inbox
+            self._inbox = Inbox()
+        loop = self._managed_loop if self._fleet is not None else self._ingest_loop
+        self._threads = [threading.Thread(target=loop, name=f"kihc-ingest-{self.channel_name}", daemon=True),
                          threading.Thread(target=self._match_loop, name=f"kihc-match-{self.channel_name}", daemon=True)]
         for t in self._threads:
             t.start()
@@ -181,6 +200,8 @@ class LiveStreamWorker:
         with self._cond:
             self._cond.notify_all()
         self._kill_proc()
+        if self._fleet is not None and self._listener is not None:
+            self._fleet.detach(self._channel_id, self._listener)      # no-op if a restarted worker already took the channel
         for t in self._threads:
             t.join(timeout)
         self.state = "stopped"
@@ -198,15 +219,21 @@ class LiveStreamWorker:
         with self._cond:
             buffered = sum(c.pcm.size for c in self._ring) / LIVE_SAMPLE_RATE
         proc = self._proc
+        pid = proc.pid if proc and proc.poll() is None else None
+        if self._fleet is not None:                          # the manager owns FFmpeg: report its child
+            st = self._fleet.stat(self._channel_id)
+            pid = st.pid if st is not None and self._listener is not None else None
         return dict(channel=self.channel_name, state=self.state, alive=self.is_alive(),
                     buffered_seconds=round(buffered, 1), max_buffered_seconds=round(self.max_buffered_seconds, 1),
                     received_seconds=round(self.samples_received / LIVE_SAMPLE_RATE, 1),
                     connect_attempts=self.connect_attempts, backoff_history=list(self.backoff_history),
                     next_retry_at=self.next_retry_at, last_error=self.last_error,
                     references=len(self._refs), detections=len(self.detections),
-                    ffmpeg_pid=proc.pid if proc and proc.poll() is None else None,
+                    ffmpeg_pid=pid, engine="fleet" if self._fleet is not None else "legacy",
                     seconds_since_data=None if self.last_data_at is None
                     else round(time.monotonic() - self.last_data_at, 1),
+                    dsp=dict(passes=self.dsp["passes"], audio_seconds=round(self.dsp["samples"] / LIVE_SAMPLE_RATE, 1),
+                             cpu_ms=round(self.dsp["ms"], 1)),
                     **self.radar())
 
     def radar(self) -> dict:
@@ -319,6 +346,20 @@ class LiveStreamWorker:
             self._stop.set()      # also ends the match thread when max_connects is reached
             self._wake.set()
 
+    def _push_chunk(self, pcm: np.ndarray, wall0: float, first: bool) -> None:
+        """One 0.2 s PCM chunk (int16, 22 050 Hz) whose first sample was captured at `wall0`: anchor, level, ring."""
+        if first:
+            self._conn_anchor = (self._g, wall0)
+            self.connected_since = time.time()
+            if getattr(self, "_clock_probe", None):
+                self._clock_probe.first_audio(self._conn_anchor[1])      # side thread: never delays the audio
+            self.state = "listening"
+        self._levels.append((time.time(), rms_dbfs(pcm.astype(np.float32) / 32768.0)))
+        self._append(_Chunk(self._g, wall0, pcm))
+        self._g += pcm.size
+        self.samples_received += pcm.size
+        self.last_data_at = time.monotonic()
+
     def _read_until_eof(self, proc) -> int:
         nbytes, got = CHUNK_SAMPLES * 2, 0
         while not self._stop.is_set():
@@ -329,19 +370,91 @@ class LiveStreamWorker:
             if pcm.size == 0:
                 continue
             if got == 0:
-                self._conn_anchor = (self._g, time.time() - pcm.size / LIVE_SAMPLE_RATE)
-                self.connected_since = time.time()
-                if getattr(self, "_clock_probe", None):
-                    self._clock_probe.first_audio(self._conn_anchor[1])      # side thread: never delays the audio
-                self.state = "listening"
-            self._levels.append((time.time(), rms_dbfs(pcm.astype(np.float32) / 32768.0)))
-            g_anchor, wall_anchor = self._conn_anchor
-            self._append(_Chunk(self._g, wall_anchor + (self._g - g_anchor) / LIVE_SAMPLE_RATE, pcm))
-            self._g += pcm.size
+                wall0 = time.time() - pcm.size / LIVE_SAMPLE_RATE
+            else:
+                g_anchor, wall_anchor = self._conn_anchor
+                wall0 = wall_anchor + (self._g - g_anchor) / LIVE_SAMPLE_RATE
+            self._push_chunk(pcm, wall0, got == 0)
             got += pcm.size
-            self.samples_received += pcm.size
-            self.last_data_at = time.monotonic()
         return got
+
+    # ------------------------------------------------------------ managed ingest (Phase 29: MultiStreamManager owns FFmpeg)
+    def _clock_info_for(self, url) -> bool:
+        """Called by the fleet just before it spawns FFmpeg for a (re)connect: arm the MCR clock probe for this connection
+        and say whether FFmpeg must log at info level so the first-segment "Opening ..." line can be read."""
+        self._clock_probe = clock_sync.probe_for(self.channel_name, url, self.db_path)
+        self._clock_wants_log = bool(self._clock_probe)
+        if self._clock_probe:
+            self._clock_probe.connecting()
+        return self._clock_wants_log
+
+    def _on_ffmpeg_log(self, line: str) -> bool:
+        probe = getattr(self, "_clock_probe", None)
+        if probe is not None and "[info]" in line:
+            seg = clock_sync.opened_segment(line)
+            if seg:
+                probe.segment_opened(seg)
+            return True                                           # info chatter never reaches the error tail
+        return False
+
+    def _ingest_segment(self, seg) -> None:
+        """Split a manager segment into the worker's 0.2 s chunks. Only the FIRST chunk of a connection takes its capture time
+        from the manager; the rest follow the audio position from that anchor, exactly like the single-worker reader. The
+        manager's own per-segment clock never runs ahead of the wall clock, which squashes the timestamps of an HLS connect
+        burst (several seconds of audio delivered at once) and would misplace every airing and evidence clip in it."""
+        pcm_all = np.frombuffer(seg.pcm, dtype="<i2")
+        for i in range(0, pcm_all.size, CHUNK_SAMPLES):
+            pcm = pcm_all[i:i + CHUNK_SAMPLES]
+            if not pcm.size:
+                continue
+            first = self._conn_got == 0
+            if first:
+                wall0 = seg.wall_start
+            else:
+                g_anchor, wall_anchor = self._conn_anchor
+                wall0 = wall_anchor + (self._g - g_anchor) / LIVE_SAMPLE_RATE
+            self._push_chunk(pcm, wall0, first)
+            self._conn_got += pcm.size
+
+    def _managed_loop(self):
+        """Consume the shared manager's audio and connection events for this channel (replaces `_ingest_loop`)."""
+        try:
+            self._listener = self._fleet.attach(
+                self._channel_id, self.channel_name, self._url, self._inbox, headers=self.headers,
+                input_args=self.ffmpeg_input_args, on_stderr=self._on_ffmpeg_log, info_for=self._clock_info_for, fresh=True)
+            self.state = "connecting"
+            while not self._stop.is_set():
+                ev = self._inbox.get(0.5)
+                if ev is None:
+                    continue
+                kind = ev[0]
+                if kind == "seg":
+                    self._ingest_segment(ev[1])
+                elif kind == "attempt":
+                    self.connect_attempts += 1
+                    self.next_retry_at, self._conn_got = None, 0
+                    if self.state != "listening":
+                        self.state = "connecting"
+                elif kind == "disc":
+                    err, retry_in = ev[1], float(ev[2] or 0.0)
+                    self.last_error = err or self.last_error
+                    log.info("[%s] disconnected (%s); retry in %.1fs", self.channel_name, self.last_error, retry_in)
+                    self._on_disconnect()
+                    self._conn_got = 0
+                    if self.max_connects is not None and self.connect_attempts >= self.max_connects:
+                        break
+                    self.backoff_history.append(retry_in)
+                    self.next_retry_at = time.time() + retry_in
+                    self.state = "backoff"
+        except Exception as exc:                                  # nothing may kill the worker silently
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            log.exception("[%s] managed ingest failed", self.channel_name)
+        finally:
+            if self._listener is not None:
+                self._fleet.detach(self._channel_id, self._listener)
+            self.state = "stopped"
+            self._stop.set()
+            self._wake.set()
 
     def _append(self, chunk):
         with self._cond:
@@ -370,6 +483,7 @@ class LiveStreamWorker:
         except Exception as exc:
             self.last_error = f"final match pass failed: {type(exc).__name__}: {exc}"
             log.exception("[%s] final match pass failed", self.channel_name)
+        self._reset_inc()                      # the next connection starts a fresh, contiguous incremental stream
         with self._cond:
             self._ring.clear()
             self._needed_g = self._g
@@ -415,41 +529,74 @@ class LiveStreamWorker:
         finally:
             conn.close()
 
+    def _reset_inc(self):
+        """Forget the incremental stream (a disconnect, a gap or nothing left to analyse): the next audio starts a new one."""
+        self._inc = None
+        self._inc_g = None
+        self._fpbuf = np.zeros(0, np.uint32)
+
+    def _advance_dsp(self, chunks, final: bool) -> list:
+        """Push ONLY the chunks not yet consumed through normalise -> decimate -> fingerprint; -> list of incremental Delta."""
+        t0 = time.perf_counter()
+        new = chunks if self._inc is None else [c for c in chunks if c.g0 >= self._inc_g]
+        deltas = []
+        if new and self._inc is not None and new[0].g0 != self._inc_g:
+            log.warning("[%s] audio gap in the ring (%d samples): restarting the incremental stream", self.channel_name,
+                        new[0].g0 - self._inc_g)
+            self._reset_inc()
+        if new:
+            if self._inc is None:
+                self._inc = incremental_dsp.IncrementalFingerprintStream(new[0].g0)
+            x = np.concatenate([c.pcm for c in new]).astype(np.float32) / 32768.0
+            deltas.append(self._inc.push(x))
+            self._inc_g = new[-1].g0 + new[-1].pcm.size
+            self.dsp["samples"] += x.size
+        if final and self._inc is not None:
+            deltas.append(self._inc.flush())             # the filter's right-hand context: zero padded, as at a stream end
+        self.dsp["passes"] += 1
+        self.dsp["ms"] += (time.perf_counter() - t0) * 1000.0
+        return deltas
+
     def _tick(self, final: bool):
         with self._tick_lock:
             self._refresh_refs()
             with self._cond:
                 chunks = list(self._ring)
-            if (not self._refs and not self.wants_fingerprints) or not chunks:
+            idle = not self._refs and not self.wants_fingerprints
+            if idle or (not chunks and not (final and self._inc is not None)):
                 with self._cond:
-                    if not self._refs and not self.wants_fingerprints:   # nothing consumes audio: evict freely
+                    if idle:                                      # nothing consumes audio: evict freely
                         self._needed_g = float("inf")
+                        self._reset_inc()
                     self._cond.notify_all()
                 return
 
-            g0 = chunks[0].g0
-            x22 = normalize_rms(np.concatenate([c.pcm for c in chunks]).astype(np.float32) / 32768.0)
-            x11 = decimate(x22)
-            if not final:   # tail samples see zero padding; they are fingerprinted next pass instead
-                x11 = x11[: max(0, x11.size - _EDGE // DECIM - 1)]
-            s0 = g0 // DECIM
-            s_aligned = -(-s0 // HOP_SIZE) * HOP_SIZE      # keep frame grid identical across passes
-            x11 = x11[s_aligned - s0:]
-            fper = StreamingFingerprinter()
-            parts = [fper.feed(x11[i:i + FP_FEED_SAMPLES]) for i in range(0, x11.size, FP_FEED_SAMPLES)]
-            fp = np.concatenate(parts) if parts else np.zeros(0, np.uint32)
-            base = s_aligned // HOP_SIZE
-            try:   # extension point (e.g. unsupervised discovery); must never break matching
-                self._on_fingerprints(fp, base, x11, s_aligned, chunks)
-            except Exception as exc:
-                self.last_error = f"fingerprint hook failed: {type(exc).__name__}: {exc}"
-                log.warning("[%s] fingerprint hook failed: %s", self.channel_name, exc)
+            deltas = self._advance_dsp(chunks, final)
+            for d in deltas:
+                if d.fp.size:
+                    if self._fpbuf.size == 0:
+                        self._fpbase = d.base
+                    self._fpbuf = np.concatenate([self._fpbuf, d.fp])
+            fp_end = self._fpbase + self._fpbuf.size
+            # extension point (e.g. unsupervised discovery): it sees each DELTA once (it ignores overlap anyway) and must
+            # be called on every pass even with no new fingerprints (the reference matcher feeds from the chunk list)
+            for d in deltas or [incremental_dsp.Delta(np.zeros(0, np.uint32), fp_end, np.zeros(0, np.float32), 0)]:
+                try:
+                    self._on_fingerprints(d.fp, d.base, d.x11, d.s_start, chunks)
+                except Exception as exc:
+                    self.last_error = f"fingerprint hook failed: {type(exc).__name__}: {exc}"
+                    log.warning("[%s] fingerprint hook failed: %s", self.channel_name, exc)
 
+            fp, base = self._fpbuf, self._fpbase
+            ring_audio = None                       # normalised snapshot of the ring: built only when a candidate appears
             for ref in self._refs.values():
                 ref.next_offset = max(ref.next_offset, base)
                 ref.scan(fp, base)
                 for off, conf, errs in list(ref.found) + ([ref.pending] if ref.pending else []):
-                    self._capture(ref, off, x22, chunks)
+                    if (ref.ad_id, off) not in self._captured:
+                        if ring_audio is None:
+                            ring_audio = normalize_rms(np.concatenate([c.pcm for c in chunks]).astype(np.float32) / 32768.0)
+                        self._capture(ref, off, ring_audio, chunks)
                 # Confirm once a full ad length has passed with no better alignment (same NMS as file scans).
                 if ref.pending and (final or ref.next_offset - ref.pending[0] >= ref.L):
                     ref.flush()
@@ -459,10 +606,17 @@ class LiveStreamWorker:
 
             keep = {(r.ad_id, r.pending[0]) for r in self._refs.values() if r.pending}
             self._captured = {k: v for k, v in self._captured.items() if k in keep}
+            # Windows older than the oldest untested one are never read again: roll the fingerprint window forward.
+            oldest = min([r.next_offset for r in self._refs.values()] + [fp_end])
+            drop = int(min(max(oldest - self._fpbase, 0), self._fpbuf.size))
+            if drop:
+                self._fpbuf, self._fpbase = self._fpbuf[drop:].copy(), self._fpbase + drop
             # Earliest audio still needed: by the matcher (oldest untested window) and/or by the hook
             # (it has consumed everything fingerprinted so far, keeping the frame overlap).
-            next_frame = min([r.next_offset for r in self._refs.values()] + [base + fp.size - 1])
+            next_frame = min([r.next_offset for r in self._refs.values()] + [fp_end - 1])
             needed = next_frame * HOP_SIZE * DECIM - 2 * _EDGE
+            if final:
+                self._reset_inc()
             with self._cond:
                 self._needed_g = needed
                 self._cond.notify_all()
@@ -487,11 +641,14 @@ class LiveStreamWorker:
         pcm = (np.clip(x22[i0:i0 + int(ref.duration * LIVE_SAMPLE_RATE)], -1, 1) * 32767).astype(np.int16)
         wall = next((c.wall0 + (g - c.g0) / LIVE_SAMPLE_RATE for c in chunks if c.g0 <= g < c.g0 + c.pcm.size),
                     chunks[0].wall0)
-        self._captured[key] = (pcm, g, wall, self._conn_anchor)
+        # The raw 11 025 Hz audio around the airing, copied NOW: this matcher confirms about one ad length after the airing
+        # ended, by when the evidence scratch ring has scrolled past its start.
+        snap = evidence_recorder.snapshot(self.channel_name, wall - evidence_recorder.PAD_SECONDS, float("inf"))
+        self._captured[key] = (pcm, g, wall, self._conn_anchor, snap)
 
     def _confirm(self, ref, offset, conf, errs):
-        pcm, g_start, wall_start, (g_anchor, _) = self._captured.get(
-            (ref.ad_id, offset), (np.zeros(0, np.int16), offset * HOP_SIZE * DECIM, time.time(), self._conn_anchor))
+        pcm, g_start, wall_start, (g_anchor, _), snap = self._captured.get(
+            (ref.ad_id, offset), (np.zeros(0, np.int16), offset * HOP_SIZE * DECIM, time.time(), self._conn_anchor, None))
         det = ref.detection(offset, conf, errs, self.source_name)
         win_start = fps_to_seconds(offset)
         rel_s, rel_e = det.airing_start - win_start, det.airing_end - win_start
@@ -503,28 +660,33 @@ class LiveStreamWorker:
         evidence, evidence_bytes = self._spectrogram(pcm[i_s:i_e], ref.ad_id, start_epoch)
         start_epoch, end_epoch = round(start_epoch, 3), round(end_epoch, 3)
         ts_cet = algeria_iso(start_epoch)
+        # Phase 29: the confirmed audio goes to disk now and its SHA-256 is chained into the seal (the spectrogram stays as a
+        # visual aid); with no buffered audio the seal falls back to the spectrogram, exactly as before.
+        clip = evidence_recorder.persist_airing_clip(self.channel_name, start_epoch, end_epoch, key=f"ad{ref.ad_id}",
+                                                     evidence_dir=self.evidence_dir, fallback=snap)
+        png_sha = hashlib.sha256(evidence_bytes).hexdigest() if evidence_bytes else None
         vhash = compute_verification_hash(ref.ad_id, self.source_name, ts_cet, end_epoch,
-                                          det.duration_detected, det.confidence_score, evidence_bytes)
-        conn = init_db(self.db_path)
-        try:
-            with conn:
-                cur = conn.execute(
-                    """INSERT OR IGNORE INTO ad_occurrences
-                       (ad_id, source_name, airing_start, airing_end, duration_detected,
-                        confidence_score, evidence_frame_path, detected_at,
-                        verification_hash, algeria_timestamp,
-                        clock_drift_seconds, clock_drift_margin_s, clock_drift_basis,
-                        broadcast_start_cet, broadcast_end_cet, mcr_drift_delta_seconds)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (ref.ad_id, self.source_name, start_epoch, end_epoch,
-                     det.duration_detected, det.confidence_score, evidence,
-                     detected_at.isoformat(timespec="seconds"), vhash, ts_cet,
-                     *clock_sync.occurrence_fields(self.channel_name).values(),
-                     *time_synchronizer.occurrence_fields(self.channel_name, start_epoch, end_epoch).values()),
-                )
-                occ_id = cur.lastrowid if cur.rowcount else None
-        finally:
-            conn.close()
+                                          det.duration_detected, det.confidence_score,
+                                          None if clip else evidence_bytes,
+                                          evidence_sha256=combine_evidence(png_sha, clip["sha256"]) if clip else None)
+        # One writer: through the shared queue (batched BEGIN IMMEDIATE, retried on lock contention, dead-lettered if it
+        # can never commit) instead of a private connection racing every other channel for the write lock.
+        from kihc.data import reference_db as rdb
+        occ_id = rdb.commit_airing(
+            self.db_path, asset_id=f"ad:{ref.ad_id}", ad_id=ref.ad_id, source_name=self.source_name,
+            airing_start=start_epoch, airing_end=end_epoch, duration=det.duration_detected,
+            confidence=det.confidence_score, algeria_timestamp=ts_cet, verification_hash=vhash,
+            detected_at=detected_at.isoformat(timespec="seconds"), status="CONFIRMED",
+            evidence_frame_path=evidence, evidence_path=clip["path"] if clip else None,
+            evidence_sha256=clip["sha256"] if clip else None, seal_clip_sha256=clip["sha256"] if clip else None,
+            **clock_sync.occurrence_fields(self.channel_name),
+            **time_synchronizer.occurrence_fields(self.channel_name, start_epoch, end_epoch))
+        if occ_id is None and clip and clip["created"]:          # the airing was already on file: its fresh clip is unreferenced
+            try:
+                (Path(clip["path"]) if Path(clip["path"]).is_absolute() else Path(self.evidence_dir) / clip["path"]).unlink(
+                    missing_ok=True)
+            except OSError:
+                pass
         if occ_id is not None:
             evidence_recorder.note_airing(self.channel_name, occ_id, start_epoch, end_epoch)
             pod_boundary_detector.note_airing(self.channel_name, occ_id, start_epoch, end_epoch, self.db_path)

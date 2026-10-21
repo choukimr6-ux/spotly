@@ -180,9 +180,15 @@ def _apply_airing(conn, *, asset_id: str, ad_id: int, source_name: str, airing_s
                   detected_at: str, penalty: dict | None = None, status: str = "CONFIRMED",
                   clock_drift_seconds: float | None = None, clock_drift_margin_s: float | None = None,
                   clock_drift_basis: str | None = None, broadcast_start_cet: str | None = None,
-                  broadcast_end_cet: str | None = None, mcr_drift_delta_seconds: float | None = None) -> int | None:
+                  broadcast_end_cet: str | None = None, mcr_drift_delta_seconds: float | None = None,
+                  evidence_frame_path: str | None = None, evidence_path: str | None = None,
+                  evidence_sha256: str | None = None, seal_clip_sha256: str | None = None) -> int | None:
     """Writer-side body (runs inside the queue's BEGIN IMMEDIATE, so there is no check-then-insert race):
-    occurrence row + match_count / last_matched_at bump + optional contract-penalty alert, all or nothing."""
+    occurrence row + match_count / last_matched_at bump + optional contract-penalty alert, all or nothing.
+
+    Phase 29: `evidence_path` / `evidence_sha256` / `seal_clip_sha256` bind the 11 025 Hz clip written at confirmation; the
+    caller has already chained the same digest into `verification_hash`. `evidence_frame_path` is the spectrogram PNG of the
+    legacy BER path."""
     conn.execute(DDL)                      # one statement; executescript() would COMMIT the writer's open transaction
     if conn.execute("SELECT 1 FROM ad_occurrences WHERE ad_id = ? AND source_name = ? AND human_verified != -1 "
                     "AND airing_start < ? AND airing_end > ? LIMIT 1",
@@ -191,11 +197,13 @@ def _apply_airing(conn, *, asset_id: str, ad_id: int, source_name: str, airing_s
     cur = conn.execute(
         "INSERT OR IGNORE INTO ad_occurrences (ad_id, source_name, airing_start, airing_end, duration_detected, "
         "confidence_score, detected_at, verification_hash, algeria_timestamp, status, clock_drift_seconds, "
-        "clock_drift_margin_s, clock_drift_basis, broadcast_start_cet, broadcast_end_cet, mcr_drift_delta_seconds) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "clock_drift_margin_s, clock_drift_basis, broadcast_start_cet, broadcast_end_cet, mcr_drift_delta_seconds, "
+        "evidence_frame_path, evidence_path, evidence_sha256, seal_clip_sha256) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ad_id, source_name, airing_start, airing_end, duration, confidence, detected_at, verification_hash,
          algeria_timestamp, status, clock_drift_seconds, clock_drift_margin_s, clock_drift_basis,
-         broadcast_start_cet, broadcast_end_cet, mcr_drift_delta_seconds))
+         broadcast_start_cet, broadcast_end_cet, mcr_drift_delta_seconds,
+         evidence_frame_path, evidence_path, evidence_sha256, seal_clip_sha256))
     if not cur.rowcount:
         return None
     conn.execute("UPDATE reference_signatures SET match_count = match_count + 1, "
@@ -243,7 +251,9 @@ def commit_airing(db_path, *, asset_id: str, ad_id: int, source_name: str, airin
                   detected_at: str, penalty: dict | None = None, status: str = "CONFIRMED",
                   clock_drift_seconds: float | None = None, clock_drift_margin_s: float | None = None,
                   clock_drift_basis: str | None = None, broadcast_start_cet: str | None = None,
-                  broadcast_end_cet: str | None = None, mcr_drift_delta_seconds: float | None = None) -> int | None:
+                  broadcast_end_cet: str | None = None, mcr_drift_delta_seconds: float | None = None,
+                  evidence_frame_path: str | None = None, evidence_path: str | None = None,
+                  evidence_sha256: str | None = None, seal_clip_sha256: str | None = None) -> int | None:
     """Log one confirmed airing, bump the signature's match statistics and (optionally) record a contract
     penalty, as ONE atomic unit routed through the central write queue (kihc.data.db_queue).
 
@@ -260,7 +270,9 @@ def commit_airing(db_path, *, asset_id: str, ad_id: int, source_name: str, airin
                          detected_at=detected_at, penalty=penalty, status=status,
                          clock_drift_seconds=clock_drift_seconds, clock_drift_margin_s=clock_drift_margin_s,
                          clock_drift_basis=clock_drift_basis, broadcast_start_cet=broadcast_start_cet,
-                         broadcast_end_cet=broadcast_end_cet, mcr_drift_delta_seconds=mcr_drift_delta_seconds).result()
+                         broadcast_end_cet=broadcast_end_cet, mcr_drift_delta_seconds=mcr_drift_delta_seconds,
+                         evidence_frame_path=evidence_frame_path, evidence_path=evidence_path,
+                         evidence_sha256=evidence_sha256, seal_clip_sha256=seal_clip_sha256).result()
 
 
 def set_airing_status(db_path, occurrence_id: int, status: str) -> bool:

@@ -218,3 +218,24 @@ def test_benchmark_capture_latency_and_footprint(tmp_path):
     print(f"\nEVIDENCE BENCHMARK  capture+hash {ms:.1f} ms | clip {ev['clip_seconds']:.1f} s = {size / 1024:.0f} KiB "
           f"({size / ev['clip_seconds'] / 1024:.1f} KiB/s) | ring {ring_bytes / 1e6:.2f} MB / channel")
     assert ms < 250 and size < 1_000_000 and ring_bytes < 2_000_000
+
+
+
+def test_legacy_airings_are_retired_once_and_never_retried_or_logged(tmp_path, caplog, monkeypatch):
+    """Phase 29.2: an airing with no clip whose audio left the ring is flagged UNAVAILABLE_LEGACY and leaves the retry queue."""
+    import logging
+    db = _db_with_breach(tmp_path)
+    monkeypatch.setattr(er, "GONE_AFTER_S", -1.0)                          # every unbuffered airing is past the ring
+    caplog.set_level(logging.DEBUG, logger="kihc.evidence")
+    er.submit_breach(db, 2, CH, T + 90, T + 120, "UNDER_DELIVERY")
+    assert er.flush(20)
+    assert er.is_unavailable(db, 2) and not er.is_unavailable(db, 1)
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO and "no evidence clip" in r.getMessage()]
+    pending = er._PENDING
+    er.submit_breach(db, 2, CH, T + 90, T + 120, "UNDER_DELIVERY")        # second time: not even enqueued
+    assert er._PENDING == pending and er._Q.empty()
+    with get_db(db) as conn:                                              # the startup sweep catches the rest in one UPDATE
+        assert conn.execute("SELECT evidence_status FROM ad_occurrences WHERE occurrence_id = 1").fetchone()[0] is None
+    monkeypatch.setattr(er, "GONE_AFTER_S", 60.0)
+    assert er.retire_legacy(db, now=T + 100000) == 1                      # occurrence 1 (2 is already retired)
+    assert er.retire_legacy(db, now=T + 100000) == 0                      # idempotent

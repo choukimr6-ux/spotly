@@ -320,6 +320,34 @@ def bind_evidence(db_path, occurrence_id: int, ev: dict, breach_type: str, contr
             complete=ev["complete"]), "evidence-recorder", entity="breach_evidence")
 
 
+UNAVAILABLE_LEGACY = "UNAVAILABLE_LEGACY"
+GONE_AFTER_S = RING_SECONDS + 60.0     # an airing that ended this long ago has left the memory ring for good
+
+
+def mark_unavailable(db_path, occurrence_id: int) -> None:
+    with get_db(db_path) as conn:
+        conn.execute("UPDATE ad_occurrences SET evidence_status = ? WHERE occurrence_id = ? AND evidence_path IS NULL",
+                     (UNAVAILABLE_LEGACY, int(occurrence_id)))
+
+
+def is_unavailable(db_path, occurrence_id: int) -> bool:
+    with get_db(db_path) as conn:
+        r = conn.execute("SELECT evidence_status FROM ad_occurrences WHERE occurrence_id = ?",
+                         (int(occurrence_id),)).fetchone()
+    return bool(r and r["evidence_status"] == UNAVAILABLE_LEGACY)
+
+
+def retire_legacy(db_path, now: float | None = None) -> int:
+    """One-off sweep (service start): airings sealed before clips were persisted, with no clip and an audio ring that no
+    longer holds them, are flagged UNAVAILABLE_LEGACY so no background job retries (or logs) them again."""
+    cutoff = (now if now is not None else time.time()) - GONE_AFTER_S
+    with get_db(db_path) as conn:
+        cur = conn.execute("UPDATE ad_occurrences SET evidence_status = ? WHERE evidence_path IS NULL "
+                           "AND seal_clip_sha256 IS NULL AND evidence_status IS NULL AND airing_end < ?",
+                           (UNAVAILABLE_LEGACY, cutoff))
+        return cur.rowcount
+
+
 def evidence_for(db_path, occurrence_id: int) -> dict | None:
     with get_db(db_path) as conn:
         r = conn.execute("SELECT evidence_path, evidence_sha256 FROM ad_occurrences WHERE occurrence_id = ?",
@@ -383,7 +411,11 @@ def _run_job(db_path, occurrence_id, channel, start, end, breach_type, contract_
         ev = capture_breach_evidence(channel, start, end, breach_type, occurrence_id=occurrence_id,
                                      evidence_dir=evidence_dir)
     except EvidenceUnavailable as exc:
-        log.info("no evidence clip for occurrence %s: %s", occurrence_id, exc)
+        if time.time() - _to_epoch(end) > GONE_AFTER_S:         # the ring cannot hold it any more: retire, never retry
+            mark_unavailable(db_path, occurrence_id)
+            log.debug("occurrence %s: %s (%s)", occurrence_id, UNAVAILABLE_LEGACY, exc)
+        else:
+            log.info("no evidence clip for occurrence %s: %s", occurrence_id, exc)
         return
     bind_evidence(db_path, occurrence_id, ev, breach_type, contract_id)
 
@@ -392,6 +424,8 @@ def submit_breach(db_path, occurrence_id: int, channel: str, start: float, end: 
                   contract_id: str | None = None, evidence_dir=None) -> None:
     """Fire-and-forget: the detection / alert loop only enqueues; a background thread cuts, hashes and stores."""
     global _THREAD, _PENDING
+    if is_unavailable(db_path, occurrence_id):                 # retired legacy airing: nothing to cut, nothing to log
+        return
     job = dict(db_path=db_path, occurrence_id=int(occurrence_id), channel=channel, start=start, end=end,
                breach_type=breach_type, contract_id=contract_id, evidence_dir=evidence_dir)
     with _DONE:

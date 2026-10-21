@@ -262,6 +262,8 @@ MIGRATIONS = [
     # row was sealed before clips were persisted, or no audio was buffered); and which process owns a channel-status row
     ("ad_occurrences", "seal_clip_sha256", "TEXT"),
     ("service_channel_status", "owner_pid", "INTEGER"),
+    # Phase 29.2: 'UNAVAILABLE_LEGACY' = no clip exists and none can ever be cut (the in-RAM ring is gone): never retried
+    ("ad_occurrences", "evidence_status", "TEXT"),
 ]
 AD_TYPES = ("self", "competitor")
 

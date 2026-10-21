@@ -61,10 +61,26 @@ def default_fleet() -> FleetIngest | None:
 
 
 def classify_link(age_s: float | None) -> str:
-    """'live' (<= 15 s), 'stale' (<= 30 s: shown, flagged) or 'offline' (anything older, or never written)."""
+    """Age of the status row only: 'live' (<= 15 s), 'stale' (<= 30 s: shown, flagged) or 'offline' (older, or never written).
+    read_service_status additionally demotes a fresh row to 'stalled' when no audio is actually flowing."""
     if age_s is None or age_s > OFFLINE_AFTER_S:
         return "offline"
     return "live" if age_s <= LIVE_FRESH_S else "stale"
+
+
+def audio_flowing(ch: dict, now: float) -> bool:
+    """Liveness contract: audio is buffered AND the newest chunk was ingested within LIVE_FRESH_S. A row that merely
+    refreshes (a worker retrying a dead upstream) proves nothing."""
+    last = ch.get("last_audio_epoch")
+    return bool((ch.get("buffered_seconds") or 0) > 0 and last and now - last <= LIVE_FRESH_S)
+
+
+def mark_stalled(ch: dict, now: float) -> dict:
+    """Channel is reporting but ingesting no audio: honest 'connecting / stalled', no stale level or uptime."""
+    last = ch.get("last_audio_epoch")
+    ch.update(state="connecting", link="stalled", level_dbfs=None, peak_dbfs_10s=None, silent=False, connected_for_s=None,
+              buffered_seconds=0.0, audio_age_s=None if not last else round(now - last, 1))
+    return ch
 
 
 def mark_offline(ch: dict) -> dict:
@@ -374,12 +390,16 @@ def read_service_status(db_path=None, stale_after: float | None = None) -> dict 
                 continue
             d = dict(name=c["channel"], restarts=c["restarts"], **json.loads(c["status_json"]))
             d.update(data_age_s=round(ch_age, 1), link=classify_link(ch_age), updated_epoch=c["updated_epoch"], offline=False)
-            channel_status.append(mark_offline(d) if d["link"] == "offline" else d)
+            if d["link"] == "offline":
+                mark_offline(d)
+            elif not audio_flowing(d, now):
+                mark_stalled(d, now)
+            channel_status.append(d)
     hb.update(heartbeat_age_s=round(age, 1), lock_held=locked,
               active=locked and hb["state"] in ("starting", "running") and age <= stale_after,
               channel_status=channel_status, orphan_rows_ignored=orphans,
-              live_channels=sum(1 for c in channel_status if c["link"] != "offline"),
-              offline_channels=sum(1 for c in channel_status if c["link"] == "offline"))
+              live_channels=sum(1 for c in channel_status if c["link"] in ("live", "stale")),
+              offline_channels=sum(1 for c in channel_status if c["link"] in ("offline", "stalled")))
     return hb
 
 

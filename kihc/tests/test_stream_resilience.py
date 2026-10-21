@@ -103,12 +103,13 @@ def test_credentials_are_masked_for_display():
 def test_shipped_overrides_cover_every_mapped_channel_with_a_direct_m3u8():
     data = json.loads(iptv.OVERRIDES_FILE.read_text(encoding="utf-8"))
     urls = iptv.parse_overrides(data)
-    assert len(urls) == len(data) == 17 and not {"el_watania_tv", "dzair_tv"} & set(urls)    # secondary extras dropped
+    # Phase 29.2: El-Heddaf is back on its open web HLS (no IPTV override); the IPTV overrides are the other 16 channels
+    assert len(urls) == len(data) == 16 and not {"el_watania_tv", "dzair_tv", "elheddaf_tv"} & set(urls)
     assert all(re.fullmatch(r"http://[\w.\-]+:\d+/live/[^/]+/[^/]+/\d+\.m3u8", u) for u in urls.values())
-    assert len(set(urls.values())) == 17                                   # one distinct provider stream per channel
+    assert len(set(urls.values())) == 16                                   # one distinct provider stream per channel
     cat = msm.load_catalogue()
     assert {iptv.squash_key(k) for k in urls} <= {iptv.squash_key(c) for c in cat.channels}   # every key is a catalogue channel
-    core = {"elheddaf_tv": "407", "echorouk_tv": "400", "ennahar_tv": "262", "samira_tv": "408", "el_bilad_tv": "282"}
+    core = {"echorouk_tv": "400", "ennahar_tv": "262", "samira_tv": "408", "el_bilad_tv": "282"}
     assert all(urls[k].endswith(f"/{sid}.m3u8") for k, sid in core.items())               # the Tier-1 commercial fleet
     assert json.loads((iptv.DATA_DIR / "service_channels.json").read_text())["channels"] == [
         "el_heddaf_tv", "echorouk_tv", "ennahar_tv", "samira_tv", "el_bilad_tv"]

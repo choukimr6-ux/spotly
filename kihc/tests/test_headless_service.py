@@ -58,7 +58,7 @@ class FakeWorker:
     def status(self):
         return dict(channel=self.spec.name, state=self.state, seconds_since_data=self.since, ffmpeg_pid=None,
                     level_dbfs=-20.0, level_history=[(time.time(), -20.0)] * 3, received_seconds=1.0,
-                    detections=0, last_error=self.last_error)
+                    detections=0, last_error=self.last_error, buffered_seconds=30.0, last_audio_epoch=time.time())
 
 
 @pytest.fixture

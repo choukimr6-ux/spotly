@@ -242,6 +242,10 @@ def run_pilot(channel: str = "elheddaf", port: int = 8502, host: str = "127.0.0.
     db_path = str(db_path or DEFAULT_DB_PATH)
     configure_logging(service_paths(db_path)["log"])
     backfill_nominal_durations(db_path)
+    from kihc.analytics.evidence_recorder import retire_legacy
+    retired = retire_legacy(db_path)
+    if retired:
+        log.info("evidence: %d pre-Phase-29 airing(s) flagged UNAVAILABLE_LEGACY (no clip can be cut; never retried)", retired)
 
     def startup_dedupe():                             # background: never delays ingest start
         try:

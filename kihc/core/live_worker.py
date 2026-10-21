@@ -171,6 +171,7 @@ class LiveStreamWorker:
         self.samples_received = 0
         self.max_buffered_seconds = 0.0
         self.last_data_at = None
+        self.last_audio_epoch = None                     # wall clock of the newest ingested chunk (telemetry liveness)
         self.started_at = None
         self.detections = collections.deque(maxlen=200)
         # Radar telemetry: raw (pre-normalization) input level per 0.2 s chunk, last 60 s.
@@ -229,7 +230,7 @@ class LiveStreamWorker:
                     connect_attempts=self.connect_attempts, backoff_history=list(self.backoff_history),
                     next_retry_at=self.next_retry_at, last_error=self.last_error,
                     references=len(self._refs), detections=len(self.detections),
-                    ffmpeg_pid=pid, engine="fleet" if self._fleet is not None else "legacy",
+                    last_audio_epoch=self.last_audio_epoch, ffmpeg_pid=pid, engine="fleet" if self._fleet is not None else "legacy",
                     seconds_since_data=None if self.last_data_at is None
                     else round(time.monotonic() - self.last_data_at, 1),
                     dsp=dict(passes=self.dsp["passes"], audio_seconds=round(self.dsp["samples"] / LIVE_SAMPLE_RATE, 1),
@@ -359,6 +360,7 @@ class LiveStreamWorker:
         self._g += pcm.size
         self.samples_received += pcm.size
         self.last_data_at = time.monotonic()
+        self.last_audio_epoch = time.time()
 
     def _read_until_eof(self, proc) -> int:
         nbytes, got = CHUNK_SAMPLES * 2, 0

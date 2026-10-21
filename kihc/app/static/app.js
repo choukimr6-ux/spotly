@@ -494,9 +494,12 @@
     if (ch.state === "backoff" && ch.next_retry_at) label += ` · retry in ${Math.max(0, Math.round(ch.next_retry_at - Date.now() / 1000))}s`;
     const stab = ch.state !== "listening" ? "" : ch.disconnects_last_hour >= 3 ? " · unstable" :
       (ch.disconnects_last_hour || (ch.connected_for_s || 0) < 60) ? " · settling" : " · stable";
+    const stalled = ch.link === "stalled";
+    if (stalled) label = "Connecting · no audio";
     setText(row.status, ch.offline ? `${label} · no report for ${Math.round(ch.data_age_s || 0)} s`
+      : stalled ? `${label}${ch.audio_age_s != null ? ` for ${Math.round(ch.audio_age_s)} s` : ""} · ${ch.source === "engine" ? "24/7 engine" : "this app"}`
       : `${label}${stab}${ch.link === "stale" ? " · data stale" : ""} · ${ch.source === "engine" ? "24/7 engine" : "this app"}`);
-    row.status.classList.toggle("text-red-300", !!ch.offline);
+    row.status.classList.toggle("text-red-300", !!ch.offline || stalled);
     const lvl = ch.level_dbfs;
     setText(row.db, lvl === null || ch.state !== "listening" ? "— dBFS" : `${fmt(lvl)} dBFS${ch.silent ? " · silent" : ""}`);
     const pct = lvl === null ? 0 : Math.max(0, Math.min(100, (lvl + 60) / 60 * 100));

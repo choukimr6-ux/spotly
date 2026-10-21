@@ -172,6 +172,7 @@ def _slim_status(name: str, s: dict, source: str, stream_ref=None, restarts=None
     out = {k: s.get(k) for k in keys}
     # Phase 29 telemetry truth: how old the supervisor's last report is, and whether it is still a live channel at all
     out.update(link=s.get("link", "live"), data_age_s=s.get("data_age_s"), offline=bool(s.get("offline")))
+    out.update(last_audio_epoch=s.get("last_audio_epoch"), audio_age_s=s.get("audio_age_s"))
     out.update(feed_label=s.get("feed_label") or "", discovery=s.get("discovery"), video=s.get("video"))
     out.update(name=name, source=source, restarts=restarts,
                level_history=[lvl for _, lvl in (s.get("level_history") or [])[-HISTORY_POINTS:]],

@@ -128,9 +128,9 @@ from kihc.service import headless_runner as hr                                  
 from kihc.service.lock import ProcessLock, service_paths                             # noqa: E402
 
 
-def _status_json(level=-20.0):
-    return json.dumps(dict(state="listening", level_dbfs=level, peak_dbfs_10s=level + 4, silent=False,
-                           connected_for_s=321.0, disconnects_last_hour=0, buffered_seconds=30.0, received_seconds=321.0,
+def _status_json(level=-20.0, buffered=30.0, audio_age=0.5):
+    return json.dumps(dict(state="listening", level_dbfs=level, last_audio_epoch=time.time() - audio_age, peak_dbfs_10s=level + 4, silent=False,
+                           connected_for_s=321.0, disconnects_last_hour=0, buffered_seconds=buffered, received_seconds=321.0,
                            detections=2, references=13, connect_attempts=1, next_retry_at=None, last_error="",
                            level_history=[[time.time(), level]] * 5, feed_label="Dedicated IPTV feed"))
 
@@ -194,6 +194,28 @@ def test_telemetry_endpoint_labels_offline_channels_and_drops_orphans(engine_db)
     assert body["engine"]["live_channels"] == 1 and body["engine"]["offline_channels"] == 1
 
 
+def test_a_retrying_channel_with_a_fresh_row_is_stalled_not_live(engine_db):
+    """Phase 29.2 contract: link=live needs buffered audio AND a chunk ingested < 15 s ago; a row that merely refreshes is not proof."""
+    import sqlite3
+    me = __import__("os").getpid()
+    _seed_engine(engine_db, [("Flowing TV", 1.0, me), ("Retry TV", 1.0, me), ("Dry TV", 1.0, me), ("Late TV", 1.0, me)])
+    rows = {"Retry TV": _status_json(buffered=0.0, audio_age=400.0),        # retry loop: nothing buffered, last chunk long ago
+            "Dry TV": _status_json(buffered=30.0, audio_age=400.0),         # ring not yet drained but no chunk for 400 s
+            "Late TV": _status_json(buffered=30.0, audio_age=16.0)}         # just past the 15 s freshness window
+    conn = sqlite3.connect(engine_db)
+    with conn:
+        for name, js in rows.items():
+            conn.execute("UPDATE service_channel_status SET status_json = ? WHERE channel = ?", (js, name))
+    conn.close()
+    st = hr.read_service_status(engine_db)
+    by = {c["name"]: c for c in st["channel_status"]}
+    assert by["Flowing TV"]["link"] == "live" and by["Flowing TV"]["state"] == "listening"
+    for n in ("Retry TV", "Dry TV", "Late TV"):
+        assert by[n]["link"] == "stalled" and by[n]["state"] == "connecting" and by[n]["level_dbfs"] is None
+        assert by[n]["offline"] is False and by[n]["audio_age_s"] is not None
+    assert (st["live_channels"], st["offline_channels"]) == (1, 3)
+
+
 def test_a_dead_engines_channels_are_not_reported_at_all(tmp_path):
     db = tmp_path / "d.db"
     _seed_engine(db, [("Echorouk TV", 2.0, __import__("os").getpid())])      # but nobody holds the service lock
@@ -221,7 +243,8 @@ class _IdleWorker:
         return True
 
     def status(self):
-        return dict(state="listening", seconds_since_data=0.1, ffmpeg_pid=None, level_dbfs=-20.0, level_history=[])
+        return dict(state="listening", seconds_since_data=0.1, ffmpeg_pid=None, level_dbfs=-20.0, level_history=[],
+                    buffered_seconds=30.0, last_audio_epoch=time.time())
 
 
 def test_supervisor_startup_purges_rows_a_previous_process_left_behind(tmp_path):

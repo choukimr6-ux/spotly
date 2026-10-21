@@ -76,9 +76,14 @@ def pilot_channel(channel: str) -> tuple[ChannelSpec, dict]:
 def split_channels(channel: str) -> list[str]:
     """'a,b,c' -> ['a', 'b', 'c']; the token '@overrides' expands to every dedicated feed in channel_overrides.json."""
     out: list[str] = []
-    if "=" in str(channel):                           # 'Name=URL' may legitimately contain commas
-        return [str(channel).strip()]
-    for tok in (t.strip() for t in str(channel).split(",")):
+    text = str(channel)
+    if ";" in text:                                   # ';' separates channels when a 'Name=URL' may itself contain commas
+        parts = text.split(";")
+    elif "=" in text:
+        return [text.strip()]
+    else:
+        parts = text.split(",")
+    for tok in (t.strip() for t in parts):
         if tok == "@overrides":
             out += [k for k in iptv_manager._overrides() if k not in out]
         elif tok and tok not in out:

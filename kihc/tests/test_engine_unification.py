@@ -497,3 +497,10 @@ def test_managed_and_legacy_engines_agree_on_what_was_detected(assets_and_db, tm
             with wave.open(r["evidence_path"], "rb") as w:
                 assert w.getnframes() / w.getframerate() >= 0.9 * (r["airing_end"] - r["airing_start"])
     assert [round(r["airing_start"] - managed[0]["airing_start"], 0) for r in managed] ==         [round(r["airing_start"] - legacy[0]["airing_start"], 0) for r in legacy]
+
+
+def test_pilot_channel_list_syntax():
+    from kihc.service.pilot import split_channels
+    assert split_channels("a,b, c,a") == ["a", "b", "c"]
+    assert split_channels("Canal=http://h/x.m3u8?a=1,2") == ["Canal=http://h/x.m3u8?a=1,2"]          # one 'Name=URL'
+    assert split_channels("Canal=http://h/x.m3u8?a=1,2;elheddaf") == ["Canal=http://h/x.m3u8?a=1,2", "elheddaf"]

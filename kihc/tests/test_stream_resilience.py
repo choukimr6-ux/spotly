@@ -105,7 +105,9 @@ def test_shipped_overrides_cover_every_mapped_channel_with_a_direct_m3u8():
     urls = iptv.parse_overrides(data)
     # Phase 29.2: El-Heddaf is back on its open web HLS (no IPTV override); the IPTV overrides are the other 16 channels
     assert len(urls) == len(data) == 16 and not {"el_watania_tv", "dzair_tv", "elheddaf_tv"} & set(urls)
-    assert all(re.fullmatch(r"http://[\w.\-]+:\d+/live/[^/]+/[^/]+/\d+\.m3u8", u) for u in urls.values())
+    open_feeds = {"al24_news"}                  # Phase 29.3: open public HLS used while the IPTV provider is unreachable
+    assert all(re.fullmatch(r"http://[\w.\-]+:\d+/live/[^/]+/[^/]+/\d+\.m3u8", u) for k, u in urls.items() if k not in open_feeds)
+    assert all(urls[k].startswith("https://") and ".m3u8" in urls[k] for k in open_feeds & set(urls))
     assert len(set(urls.values())) == 16                                   # one distinct provider stream per channel
     cat = msm.load_catalogue()
     assert {iptv.squash_key(k) for k in urls} <= {iptv.squash_key(c) for c in cat.channels}   # every key is a catalogue channel

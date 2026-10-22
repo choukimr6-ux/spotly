@@ -86,10 +86,10 @@ def test_spa_and_static_assets(client):
     for element_id in ("kpi-total", "kpi-conf", "kpi-sov", "chart-premium", "channel-list", "chart-clutter",
                        "radar-list", "cert-select", "cert-download", "preview-modal", "toggle-btn", "engine-pill"):
         assert f'id="{element_id}"' in html, element_id
-    assert "cdn.tailwindcss.com/3.4.16" in html and "chart.js@4.4.1" in html and "lucide@0.453.0" in html
+    assert all(f"/static/vendor/{lib}" in html for lib in ("tailwind.play.js", "chart.umd.min.js", "lucide.min.js"))   # Phase 31.1: vendored
     assert 'sandbox="allow-scripts allow-presentation allow-popups"' in html     # no allow-same-origin
     import re
-    for lib in ("chart.js@4.4.1", "lucide@0.453.0"):                           # optional libs never block the app
+    for lib in ("chart.umd.min.js", "lucide.min.js"):                           # optional libs never block the app
         tag = re.search(rf'<script[^>]*{re.escape(lib)}[^>]*>', html).group(0)
         assert " async" in tag and " defer" not in tag, tag
     assert all(re.search(r'class="relative[^"]*"><canvas id="' + c, html) for c in

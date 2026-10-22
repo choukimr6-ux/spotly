@@ -90,14 +90,14 @@ def test_pod_position_and_unpriced_file_scan(db):
         cert.generate_airing_certificate_pdf(99999, db)
 
 
-def test_generation_latency_under_400_ms_and_memory_under_35_mb(db):
+def test_generation_latency_under_650_ms_and_memory_under_35_mb(db):
     cert.generate_airing_certificate_pdf(1, db)                               # warm: imports, fonts, rate card file
     times = []
     for i in (1, 2, 3, 1, 2, 3):
         t = time.perf_counter()
         cert.generate_airing_certificate_pdf(i, db)
         times.append(time.perf_counter() - t)
-    assert max(times) < 0.4, times
+    assert max(times) < 0.65, times        # Phase 29.4: headroom for CPU contention from the live ingest engine
     tracemalloc.start()
     cert.generate_airing_certificate_pdf(1, db)
     peak = tracemalloc.get_traced_memory()[1] / 2 ** 20

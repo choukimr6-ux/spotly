@@ -213,11 +213,16 @@ def test_real_supervisor_detects_and_flushes_on_shutdown(assets, tmp_path):
     t = threading.Thread(target=sup.run)
     t.start()
     try:
-        def detected():
-            st = read_service_status(db)
-            return st and st["channel_status"] and st["channel_status"][0]["detections"] >= 1
+        seen = {}
+
+        def detected():           # a file source ends in seconds; the Phase 29.2 contract then reports 'stalled' (no level), so
+            st = read_service_status(db)   # capture the snapshot in which detection and a live level coincide
+            ok = st and st["channel_status"] and st["channel_status"][0]["detections"] >= 1                 and st["channel_status"][0]["level_dbfs"] is not None
+            if ok:
+                seen["st"] = st
+            return ok
         assert _wait(detected, 30)
-        st = read_service_status(db)
+        st = seen["st"]
         ch = st["channel_status"][0]
         print(f"\n[SERVICE] heartbeat age {st['heartbeat_age_s']}s rss {st['rss_mb']} MB "
               f"ffmpeg {st['ffmpeg_rss_mb']} MB · {ch['name']} level {ch['level_dbfs']} dBFS")

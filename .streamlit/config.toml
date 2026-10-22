@@ -1,5 +1,5 @@
-# KIHC dashboard theme (read when Streamlit is launched from the project root).
-# Base palette lives here so every native widget is themed; kihc/app/theme.py adds the
+# SPOTLY dashboard theme (read when Streamlit is launched from the project root).
+# Base palette lives here so every native widget is themed; spotly/app/theme.py adds the
 # bento cards, gradients, pills and tab styling on top.
 
 [theme]

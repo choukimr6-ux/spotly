@@ -7,7 +7,7 @@ pytest
 requests>=2.31.0
 streamlink>=6.5.0
 reportlab>=4.0.0
-fastapi          # web app (kihc/app/api_server.py); uvicorn + jinja2 already come with streamlit
+fastapi          # web app (spotly/app/api_server.py); uvicorn + jinja2 already come with streamlit
 uvicorn
 httpx2           # FastAPI/Starlette TestClient (tests)
 faster-whisper>=1.1.0  # optional: speech-to-text of discovered assets (separate process; CPU int8)

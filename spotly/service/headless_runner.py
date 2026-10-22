@@ -1,0 +1,466 @@
+"""Spotly 24/7 headless monitoring service (no Streamlit, no browser).
+
+    python -m spotly.cli run-service --channel el_heddaf_tv [--channel echorouk_tv ...]
+    python -m spotly.cli run-service                    # channels from data/service_channels.json
+    python -m spotly.cli stop-service                   # graceful stop from any console
+
+Supervisor responsibilities (every tick, default 5 s):
+  * heartbeat row + per-channel telemetry in SQLite (read by the dashboard)
+  * restart a worker whose threads died, whose stream delivered no audio data for
+    `freeze_after` seconds (default 20) while it claimed to be listening, or that has been
+    stuck connecting (no first audio) for `connect_timeout` seconds (default 45)
+    (data flow, not loudness: a channel airing silence is not frozen; the radar flags dead air)
+  * gc.collect() every `gc_every` seconds (default 60 min)
+  * graceful shutdown on SIGINT / SIGTERM / SIGBREAK or a stop-request file:
+    workers are stopped so pending matches are confirmed, then the lock is released
+Single instance per database via an OS file lock.
+"""
+import gc
+import json
+import logging
+import logging.handlers
+import os
+import re
+import signal
+import socket
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from spotly.config import DATA_DIR, DEFAULT_DB_PATH, EVIDENCE_DIR
+from spotly.core.live_worker import LiveStreamWorker
+from spotly.ingest.fleet import FleetIngest, channel_slug
+from spotly.database import telemetry_store
+from spotly.service.lock import ProcessLock, service_paths
+from spotly.service.sysinfo import memory_mb
+
+log = logging.getLogger("spotly.service")
+
+CONFIG_FILE = DATA_DIR / "service_channels.json"
+RAM_BUDGET_MB = 250.0
+EXIT_OK, EXIT_ALREADY_RUNNING, EXIT_NO_CHANNELS = 0, 3, 2
+
+# Telemetry truth (Phase 29): a channel row is only as good as its age. The supervisor rewrites every row each tick (5 s).
+LIVE_FRESH_S = 15.0                  # a row this young is live
+OFFLINE_AFTER_S = 30.0               # older than this the channel is reported OFFLINE, never as its last known state
+OFFLINE_LABEL = "OFFLINE / DISCONNECTED"
+
+
+INGEST_ENGINE_ENV = "SPOTLY_INGEST_ENGINE"
+
+
+def default_fleet() -> FleetIngest | None:
+    """The production ingest engine: one MultiStreamManager under every channel. SPOTLY_INGEST_ENGINE=legacy is the escape
+    hatch back to a private FFmpeg + reader thread per worker."""
+    if os.environ.get(INGEST_ENGINE_ENV, "managed").strip().lower() == "legacy":
+        return None
+    return FleetIngest()
+
+
+def classify_link(age_s: float | None) -> str:
+    """Age of the status row only: 'live' (<= 15 s), 'stale' (<= 30 s: shown, flagged) or 'offline' (older, or never written).
+    read_service_status additionally demotes a fresh row to 'stalled' when no audio is actually flowing."""
+    if age_s is None or age_s > OFFLINE_AFTER_S:
+        return "offline"
+    return "live" if age_s <= LIVE_FRESH_S else "stale"
+
+
+def audio_flowing(ch: dict, now: float) -> bool:
+    """Liveness contract: audio is buffered AND the newest chunk was ingested within LIVE_FRESH_S. A row that merely
+    refreshes (a worker retrying a dead upstream) proves nothing."""
+    last = ch.get("last_audio_epoch")
+    return bool((ch.get("buffered_seconds") or 0) > 0 and last and now - last <= LIVE_FRESH_S)
+
+
+def mark_stalled(ch: dict, now: float) -> dict:
+    """Channel is reporting but ingesting no audio: honest 'connecting / stalled', no stale level or uptime."""
+    last = ch.get("last_audio_epoch")
+    ch.update(state="connecting", link="stalled", level_dbfs=None, peak_dbfs_10s=None, silent=False, connected_for_s=None,
+              buffered_seconds=0.0, audio_age_s=None if not last else round(now - last, 1))
+    return ch
+
+
+def mark_offline(ch: dict) -> dict:
+    """Replace a dead channel's last-known measurements with an explicit OFFLINE state (no phantom levels or uptime)."""
+    ch.update(state=OFFLINE_LABEL, offline=True, level_dbfs=None, peak_dbfs_10s=None, silent=False, connected_for_s=None,
+              buffered_seconds=0.0, level_history=[], next_retry_at=None)
+    return ch
+
+
+class ServiceAlreadyRunning(RuntimeError):
+    pass
+
+
+@dataclass
+class ChannelSpec:
+    name: str
+    source: str | Callable[[], str]
+    headers: dict = field(default_factory=dict)
+    key: str = ""
+    feed_label: str = ""          # shown in telemetry, e.g. "Direct Web Feed"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def resolve_channel_arg(arg: str) -> ChannelSpec:
+    """'name=url_or_path' | national key (el_heddaf_tv, or prefix 'el_heddaf') | IPTV channel slug."""
+    from spotly.connectors import iptv_manager as iptv
+
+    if "=" in arg:
+        name, src = arg.split("=", 1)
+        return ChannelSpec(name.strip(), src.strip(), key=_slug(name))
+    key = _slug(arg)
+    if iptv.override_url(key):                          # Phase 28: a dedicated IPTV feed exists for this channel
+        return ChannelSpec(iptv.display_name(key), iptv.channel_resolver(key), key=key, feed_label="Dedicated IPTV feed")
+    squash = key.replace("_", "")                       # 'elheddaf' == 'el_heddaf'
+    matches = [k for k in iptv.NATIONAL_BROADCASTERS if k == key or k.startswith(key)
+               or k.replace("_", "").startswith(squash) or _slug(iptv.NATIONAL_BROADCASTERS[k].name) == key]
+    if len(matches) == 1:
+        b = iptv.NATIONAL_BROADCASTERS[matches[0]]
+        return ChannelSpec(b.name, iptv.channel_resolver(b.key), key=b.key,
+                           feed_label="Dedicated IPTV feed" if iptv.override_url(b.key) else "")
+    if len(matches) > 1:
+        raise ValueError(f"'{arg}' is ambiguous: {matches}")
+    for ch in iptv.fetch_channels():
+        if _slug(ch.name) == key or _slug(ch.name).startswith(key):
+            return ChannelSpec(ch.name, ch.url, ch.headers, key=_slug(ch.name))
+    raise ValueError(f"Unknown channel '{arg}'. Use a key such as {list(iptv.NATIONAL_BROADCASTERS)} "
+                     f"or 'Name=https://.../index.m3u8'.")
+
+
+def load_config_channels(path=CONFIG_FILE) -> list[str]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return [c for c in data.get("channels", []) if isinstance(c, str)]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class Supervisor:
+    def __init__(self, channels: list[ChannelSpec], db_path=None, *, tick: float = 5.0,
+                 freeze_after: float = 20.0, connect_timeout: float = 45.0, gc_every: float = 3600.0,
+                 evidence_dir=EVIDENCE_DIR, worker_factory: Callable[[ChannelSpec], object] | None = None,
+                 worker_kwargs: dict | None = None, fleet: FleetIngest | None = None):
+        if not channels:
+            raise ValueError("no channels to monitor")
+        self.channels = channels
+        self.fleet = fleet                # Phase 29: the shared MultiStreamManager the workers consume (None = legacy)
+        self.db_path = str(db_path or DEFAULT_DB_PATH)
+        self.tick_seconds, self.freeze_after, self.gc_every = tick, freeze_after, gc_every
+        self.connect_timeout = connect_timeout
+        self._connecting_since: dict[int, float] = {}
+        self.evidence_dir = evidence_dir
+        self.worker_kwargs = worker_kwargs or {}
+        self._factory = worker_factory or self._default_factory
+        self.paths = service_paths(self.db_path)
+        self.lock = ProcessLock(self.paths["lock"])
+        self._stop = threading.Event()
+        self.stop_reason = ""
+        self.workers: dict[str, object] = {}
+        self.restarts: dict[str, int] = {c.name: 0 for c in channels}
+        self.restart_log: list[tuple[float, str, str]] = []
+        self.frame_ingests: dict[str, object] = {}      # channel -> FrameIngest, owned (started/stopped) by the caller
+        self.gc_runs, self.last_gc_at = 0, None
+        self._last_gc = time.monotonic()
+        self.started_at = None
+        self.ticks = 0
+
+    # ------------------------------------------------------------ lifecycle
+    def fleet_kwargs(self, spec: ChannelSpec) -> dict:
+        """Worker kwargs that hand the channel's ingest to the shared manager (empty in legacy mode)."""
+        return dict(fleet=self.fleet, channel_id=spec.key or channel_slug(spec.name)) if self.fleet is not None else {}
+
+    def _default_factory(self, spec: ChannelSpec):
+        return LiveStreamWorker(spec.name, spec.source, self.db_path, headers=spec.headers,
+                                evidence_dir=self.evidence_dir, **self.fleet_kwargs(spec), **self.worker_kwargs)
+
+    def request_stop(self, reason: str = "requested"):
+        if not self._stop.is_set():
+            self.stop_reason = reason
+            log.info("stop requested: %s", reason)
+        self._stop.set()
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
+    def start(self):
+        if not self.lock.acquire():
+            raise ServiceAlreadyRunning(f"another Spotly service holds {self.paths['lock']}")
+        try:
+            self.paths["stop"].unlink(missing_ok=True)      # stale stop request from a previous run
+            self.purge_orphan_channels()
+            self.started_at = _now_iso()
+            self._write_heartbeat("starting")
+            for spec in self.channels:
+                self.workers[spec.name] = self._factory(spec).start()
+                log.info("started worker for %s", spec.name)
+        except BaseException:
+            for w in self.workers.values():
+                w.stop()
+            self._write_heartbeat("stopped", message="startup failed")
+            self.lock.release()
+            raise
+
+    def purge_orphan_channels(self) -> int:
+        """Delete channel-status rows no live supervisor owns. Holding the single-instance lock proves every row still in the
+        table was written by a process that is gone, so the dashboard can never be served a dead process's channels."""
+        n = []
+        self._db(lambda c: n.append(c.execute("DELETE FROM service_channel_status").rowcount))
+        if n and n[0]:
+            log.info("purged %d orphaned channel-status row(s) left by a previous process", n[0])
+        return n[0] if n else 0
+
+    def run(self) -> int:
+        """Blocking supervisor loop. Returns a process exit code."""
+        self.start()
+        try:
+            while not self._stop.is_set():
+                self.tick()
+                self._stop.wait(self.tick_seconds)
+        finally:
+            self.shutdown()
+        return EXIT_OK
+
+    def shutdown(self):
+        self._stop.set()
+        self._write_heartbeat("stopping")
+        stoppers = [threading.Thread(target=w.stop, daemon=True) for w in self.workers.values()]
+        for t in stoppers:                                   # parallel: each stop flushes pending matches
+            t.start()
+        for t in stoppers:
+            t.join(15)
+        if self.fleet is not None:
+            self.fleet.stop()
+        self._write_channels()
+        self._write_heartbeat("stopped", message=f"graceful shutdown ({self.stop_reason or 'requested'})")
+        log.info("service stopped (%s)", self.stop_reason or "requested")
+        self.paths["stop"].unlink(missing_ok=True)
+        self.lock.release()
+
+    # ------------------------------------------------------------ supervision
+    def tick(self):
+        self.ticks += 1
+        if self.paths["stop"].exists():
+            self.request_stop("stop-request file")
+            return
+        for spec in self.channels:
+            w = self.workers.get(spec.name)
+            reason = self._needs_restart(w)
+            if reason:
+                self._restart(spec, reason)
+        if time.monotonic() - self._last_gc >= self.gc_every:
+            freed = gc.collect()
+            self.gc_runs += 1
+            self.last_gc_at = _now_iso()
+            self._last_gc = time.monotonic()
+            log.info("gc.collect(): %d objects freed", freed)
+        self._write_channels()
+        self._write_heartbeat("running")
+
+    def _needs_restart(self, w) -> str | None:
+        if w is None:
+            return "worker missing"
+        if not w.is_alive():
+            return f"worker threads ended (state={w.state}, last_error={w.last_error[:80]!r})"
+        s = w.status()
+        since = s.get("seconds_since_data")
+        if s["state"] == "listening" and since is not None and since > self.freeze_after:
+            return f"frozen: no audio data for {since:.0f}s"
+        # A pipe can also hang before the first audio arrives (server stalls mid-probe).
+        key = id(w)
+        if s["state"] == "connecting":
+            first = self._connecting_since.setdefault(key, time.monotonic())
+            if time.monotonic() - first > self.connect_timeout:
+                self._connecting_since.pop(key, None)
+                return f"stuck connecting for {self.connect_timeout:.0f}s with no audio"
+        else:
+            self._connecting_since.pop(key, None)
+        return None
+
+    def _restart(self, spec: ChannelSpec, reason: str):
+        old = self.workers.get(spec.name)
+        self.restarts[spec.name] += 1
+        self.restart_log.append((time.time(), spec.name, reason))
+        log.warning("restarting %s (#%d): %s", spec.name, self.restarts[spec.name], reason)
+        if old is not None:   # stop in the background so one hung pipe can't stall the supervisor
+            threading.Thread(target=old.stop, daemon=True, name=f"spotly-reap-{spec.name}").start()
+        self.workers[spec.name] = self._factory(spec).start()
+
+    # ------------------------------------------------------------ telemetry
+    def _ffmpeg_rss(self, statuses) -> float:
+        return sum(memory_mb(s["ffmpeg_pid"])[0] for s in statuses if s.get("ffmpeg_pid"))
+
+    def _write_channels(self):
+        rows, statuses = [], []
+        refs = {c.name: (c.source if isinstance(c.source, str) else f"channel:{c.key}" if c.key else None)
+                for c in self.channels}
+        labels = {c.name: c.feed_label for c in self.channels}
+        for name, w in self.workers.items():
+            s = w.status()
+            s["level_history"] = s.get("level_history", [])[-150:]
+            s["stream_ref"] = refs.get(name)        # lets the dashboard offer a client-side preview
+            s["feed_label"] = labels.get(name, "")
+            fi = self.frame_ingests.get(name)
+            if fi is not None:                      # Phase 25: live 2 fps video telemetry next to the audio status
+                try:
+                    from spotly.analytics import pod_boundary_detector as pbd
+                    s["video"] = dict(fi.status(), sensing=pbd.get_detector(name).sensing_status())
+                except Exception:
+                    log.exception("video telemetry failed")
+            statuses.append(s)
+            rows.append((name, s["state"], time.time(), self.restarts.get(name, 0), json.dumps(s), os.getpid()))
+        self._last_statuses = statuses
+        self._db(lambda c: c.executemany(
+            "INSERT INTO service_channel_status (channel, state, updated_epoch, restarts, status_json, owner_pid) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(channel) DO UPDATE SET state=excluded.state, "
+            "updated_epoch=excluded.updated_epoch, restarts=excluded.restarts, status_json=excluded.status_json, "
+            "owner_pid=excluded.owner_pid",
+            rows))
+
+    def _write_heartbeat(self, state: str, message: str = ""):
+        rss, peak = memory_mb()
+        ffmpeg = self._ffmpeg_rss(getattr(self, "_last_statuses", []))
+        if rss + ffmpeg > RAM_BUDGET_MB:
+            message = message or f"over RAM budget: {rss + ffmpeg:.0f} MB > {RAM_BUDGET_MB:.0f} MB"
+            log.warning(message)
+        self._db(lambda c: c.execute(
+            "INSERT INTO service_heartbeat (service_id, pid, hostname, state, started_at, heartbeat_at, "
+            "heartbeat_epoch, tick_seconds, rss_mb, peak_rss_mb, ffmpeg_rss_mb, channels, restarts, gc_runs, "
+            "last_gc_at, message) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(service_id) DO UPDATE SET pid=excluded.pid, hostname=excluded.hostname, "
+            "state=excluded.state, started_at=excluded.started_at, heartbeat_at=excluded.heartbeat_at, "
+            "heartbeat_epoch=excluded.heartbeat_epoch, tick_seconds=excluded.tick_seconds, rss_mb=excluded.rss_mb, "
+            "peak_rss_mb=excluded.peak_rss_mb, ffmpeg_rss_mb=excluded.ffmpeg_rss_mb, channels=excluded.channels, "
+            "restarts=excluded.restarts, gc_runs=excluded.gc_runs, last_gc_at=excluded.last_gc_at, "
+            "message=excluded.message",
+            (os.getpid(), socket.gethostname(), state, self.started_at, _now_iso(), time.time(),
+             self.tick_seconds, round(rss, 1), round(peak, 1), round(ffmpeg, 1), len(self.channels),
+             sum(self.restarts.values()), self.gc_runs, self.last_gc_at, message)))
+
+    def _db(self, fn):
+        """Telemetry write: the separate spotly_telemetry.db (Phase 30), never the forensic ledger."""
+        try:
+            conn = telemetry_store.connect(self.db_path)
+            try:
+                with conn:
+                    fn(conn)
+            finally:
+                conn.close()
+        except Exception:   # telemetry must never take the service down
+            log.exception("telemetry write failed")
+
+
+# ---------------------------------------------------------------- service status (for the dashboard / CLI)
+
+def read_service_status(db_path=None, stale_after: float | None = None) -> dict | None:
+    """Heartbeat + channel telemetry, with `active` = lock held AND heartbeat fresh."""
+    from spotly.service.lock import is_locked
+    db_path = str(db_path or DEFAULT_DB_PATH)
+    conn = telemetry_store.connect(db_path)
+    try:
+        hb = conn.execute("SELECT * FROM service_heartbeat WHERE service_id = 1").fetchone()
+        chans = conn.execute("SELECT * FROM service_channel_status ORDER BY channel").fetchall()
+    finally:
+        conn.close()
+    if hb is None:
+        return None
+    hb = dict(hb)
+    stale_after = stale_after or 3 * (hb["tick_seconds"] or 5.0) + 5.0
+    now = time.time()
+    age = now - (hb["heartbeat_epoch"] or 0)
+    locked = is_locked(service_paths(db_path)["lock"])
+    channel_status, orphans = [], 0
+    if hb["state"] in ("starting", "running"):
+        for c in chans:
+            ch_age = now - (c["updated_epoch"] or 0)
+            owner = c["owner_pid"] if "owner_pid" in c.keys() else None
+            # a row belongs to the live supervisor only if that process wrote it; a pre-Phase-29 row (no owner) is trusted
+            # only while it is young. Anything else is a phantom left by a dead process and is not served at all.
+            if (owner is not None and owner != hb["pid"]) or (owner is None and ch_age > OFFLINE_AFTER_S):
+                orphans += 1
+                continue
+            d = dict(name=c["channel"], restarts=c["restarts"], **json.loads(c["status_json"]))
+            d.update(data_age_s=round(ch_age, 1), link=classify_link(ch_age), updated_epoch=c["updated_epoch"], offline=False)
+            if d["link"] == "offline":
+                mark_offline(d)
+            elif not audio_flowing(d, now):
+                mark_stalled(d, now)
+            channel_status.append(d)
+    hb.update(heartbeat_age_s=round(age, 1), lock_held=locked,
+              active=locked and hb["state"] in ("starting", "running") and age <= stale_after,
+              channel_status=channel_status, orphan_rows_ignored=orphans,
+              live_channels=sum(1 for c in channel_status if c["link"] in ("live", "stale")),
+              offline_channels=sum(1 for c in channel_status if c["link"] in ("offline", "stalled")))
+    return hb
+
+
+# ---------------------------------------------------------------- entry point
+
+def _setup_logging(log_path: Path, verbose: bool = False):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s [%(threadName)s] %(message)s")
+    root = logging.getLogger("spotly")
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    fh = logging.handlers.RotatingFileHandler(log_path, maxBytes=5 * 2 ** 20, backupCount=3, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(fh)
+    root.addHandler(sh)
+
+
+def install_signal_handlers(sup: Supervisor):
+    def handler(signum, _frame):
+        sup.request_stop(signal.Signals(signum).name)
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):          # SIGBREAK: Ctrl+Break / console close on Windows
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), handler)
+
+
+def run_service(channel_args: list[str] | None = None, db_path=None, *, config=CONFIG_FILE, tick: float = 5.0,
+                freeze_after: float = 20.0, connect_timeout: float = 45.0, gc_every: float = 3600.0,
+                verbose: bool = False) -> int:
+    db_path = str(db_path or DEFAULT_DB_PATH)
+    _setup_logging(service_paths(db_path)["log"], verbose)
+    args = channel_args or load_config_channels(config)
+    if not args:
+        log.error("no channels given (use --channel or %s)", config)
+        return EXIT_NO_CHANNELS
+    specs = []
+    for a in args:
+        try:
+            specs.append(resolve_channel_arg(a))
+        except ValueError as exc:
+            log.error("%s", exc)
+            return EXIT_NO_CHANNELS
+    sup = Supervisor(specs, db_path, tick=tick, freeze_after=freeze_after, connect_timeout=connect_timeout,
+                     gc_every=gc_every, fleet=default_fleet())
+    if os.environ.get("SPOTLY_FRAMES", "on").lower() not in ("off", "0", "false"):
+        from spotly.stream import elheddaf_stream as heddaf
+        for s in specs:                              # El-Heddaf only: the one feed with a verified video rendition
+            if s.name == heddaf.CHANNEL_NAME and not s.feed_label.startswith("Dedicated"):   # the video rendition is the web feed's
+                sup.frame_ingests[s.name] = heddaf.FrameIngest(s.name).start()
+                log.info("video boundary sensing ON for %s: %dx%d @ %d fps", s.name, heddaf.FRAME_W, heddaf.FRAME_H,
+                         heddaf.FRAME_FPS)
+    install_signal_handlers(sup)
+    log.info("Spotly service starting: pid=%d db=%s channels=%s", os.getpid(), db_path, [s.name for s in specs])
+    try:
+        return sup.run()
+    except ServiceAlreadyRunning as exc:
+        log.error("%s", exc)
+        return EXIT_ALREADY_RUNNING
+    finally:
+        for fi in sup.frame_ingests.values():
+            fi.stop()

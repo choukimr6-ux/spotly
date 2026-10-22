@@ -1,0 +1,353 @@
+{
+ "_meta": {
+  "version": 1,
+  "note": "URLs are candidates, never guaranteed: public Algerian streams rotate. 'hls' = fixed URL, 'broadcaster' = spotly.connectors.iptv_manager registry key (direct HLS, then YouTube Live), 'playlist' = case-insensitive name match in the iptv-org Algeria playlist. spotly/data/channel_overrides.json {channel_id: url} wins over all. A channel nothing resolves stays 'unresolved' and is retried every unresolved_retry_sec.",
+  "priority_note": "The 10 'priority' channels are the commercial ones (assumed from the brief); change 'tier' to move a channel between pools."
+ },
+ "defaults": {
+  "sample_rate": 16000,
+  "segment_seconds": 2.0,
+  "queue_max_segments": 600,
+  "stall_timeout_sec": 20,
+  "backoff_base_sec": 2.0,
+  "backoff_max_sec": 60.0,
+  "healthy_after_sec": 30.0,
+  "unresolved_retry_sec": 300.0,
+  "live_start_index": -2,
+  "max_active": 12
+ },
+ "active_pools": [
+  "priority"
+ ],
+ "channels": [
+  {
+   "id": "tv1_nationale",
+   "name": "TV1 (Télévision Algérienne)",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV1",
+     "Algerie TV1",
+     "Télévision Algérienne"
+    ]
+   }
+  },
+  {
+   "id": "canal_algerie",
+   "name": "Canal Algérie (TV2)",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "hls",
+    "url": "http://185.9.2.18/chid_347/index.m3u8"
+   }
+  },
+  {
+   "id": "tv3_algerie3",
+   "name": "TV3 (Algérie 3)",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV3",
+     "Algerie 3"
+    ]
+   }
+  },
+  {
+   "id": "tv4_tamazight",
+   "name": "TV4 (Tamazight)",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV4",
+     "Tamazight"
+    ]
+   }
+  },
+  {
+   "id": "tv5_coran",
+   "name": "TV5 (Coran TV)",
+   "tier": "secondary",
+   "group": "religious",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV5",
+     "Coran"
+    ]
+   }
+  },
+  {
+   "id": "tv6_jeunesse",
+   "name": "TV6 Algérie",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV6"
+    ]
+   }
+  },
+  {
+   "id": "tv7_el_maarifa",
+   "name": "TV7 El Maarifa",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV7",
+     "Maarifa"
+    ]
+   }
+  },
+  {
+   "id": "tv8_edhakira",
+   "name": "TV8 Edhakira",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV8",
+     "Edhakira",
+     "Dhakira"
+    ]
+   }
+  },
+  {
+   "id": "tv9_parlementaire",
+   "name": "TV9 (Parlementaire)",
+   "tier": "secondary",
+   "group": "public",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "TV9",
+     "Parlementaire"
+    ]
+   }
+  },
+  {
+   "id": "al24_news",
+   "name": "AL24 News",
+   "tier": "secondary",
+   "group": "news",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "AL24",
+     "Al24"
+    ]
+   }
+  },
+  {
+   "id": "echorouk_tv",
+   "name": "Echorouk TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "broadcaster",
+    "key": "echorouk_tv"
+   }
+  },
+  {
+   "id": "echorouk_news",
+   "name": "Echorouk News",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Echorouk News"
+    ]
+   }
+  },
+  {
+   "id": "ennahar_tv",
+   "name": "Ennahar TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "broadcaster",
+    "key": "ennahar_tv"
+   }
+  },
+  {
+   "id": "el_bilad_tv",
+   "name": "El Bilad TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "broadcaster",
+    "key": "el_bilad_tv"
+   }
+  },
+  {
+   "id": "el_hayat_tv",
+   "name": "El Hayat TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "El Hayat",
+     "Hayat TV"
+    ]
+   }
+  },
+  {
+   "id": "samira_tv",
+   "name": "Samira TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Samira"
+    ]
+   }
+  },
+  {
+   "id": "el_heddaf_tv",
+   "name": "El-Heddaf TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "hls",
+    "url": "https://live.elheddaftv.com:8081/elheddaftv/tracks-a1/mono.m3u8"
+   }
+  },
+  {
+   "id": "bahia_tv",
+   "name": "Bahia TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Bahia"
+    ]
+   }
+  },
+  {
+   "id": "el_adjwaa_tv",
+   "name": "El Adjwaa TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Adjwaa",
+     "Ajwaa"
+    ]
+   }
+  },
+  {
+   "id": "lina_tv",
+   "name": "Lina TV",
+   "tier": "priority",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Lina TV",
+     "Lina"
+    ]
+   }
+  },
+  {
+   "id": "berbere_tv",
+   "name": "Berbère TV",
+   "tier": "secondary",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Berbere",
+     "Berbère"
+    ]
+   }
+  },
+  {
+   "id": "cna_chaine_nord_africaine",
+   "name": "CNA (Chaîne Nord-Africaine)",
+   "tier": "secondary",
+   "group": "news",
+   "enabled": true,
+   "source": {
+    "type": "hls",
+    "url": "https://live.creacast.com/cna/stream/playlist.m3u8"
+   }
+  },
+  {
+   "id": "dzair_news",
+   "name": "Dzair News",
+   "tier": "secondary",
+   "group": "news",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Dzair News"
+    ]
+   }
+  },
+  {
+   "id": "el_djazairia_one",
+   "name": "El Djazairia One",
+   "tier": "secondary",
+   "group": "commercial",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Djazairia One",
+     "Djazairia"
+    ]
+   }
+  },
+  {
+   "id": "al_magharibia_tv",
+   "name": "Al Magharibia TV",
+   "tier": "secondary",
+   "group": "news",
+   "enabled": true,
+   "source": {
+    "type": "playlist",
+    "match": [
+     "Magharibia",
+     "Maghribia"
+    ]
+   }
+  }
+ ]
+}

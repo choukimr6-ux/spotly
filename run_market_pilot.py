@@ -1,4 +1,4 @@
-"""KIHC commercial pilot: an isolated, non-destructive end-to-end run.
+"""Spotly commercial pilot: an isolated, non-destructive end-to-end run.
 
     python run_market_pilot.py            # run, print the report, clean up
     python run_market_pilot.py --keep     # keep pilot_test.db + evidence for inspection
@@ -10,7 +10,7 @@ What it does (nothing touches the production database, evidence folder or source
   3. Builds a 3-minute El-Heddaf TV segment: programme intro, a break of
      Mobilis -> 2 s -> Ooredoo -> 2 s -> Mobilis, then outro, under channel noise, and passes it
      through a real AAC encode (FFmpeg pipes, in memory).
-  4. Scans it with KIHC's in-memory matcher, reconstructs the pod, checks positions
+  4. Scans it with Spotly's in-memory matcher, reconstructs the pod, checks positions
      (First / Middle / Last), verifies every SHA-256 hash, proves tampering is detected,
      and renders a PDF certificate per airing (in memory).
   5. Prints a summary table; exits 0 only if every check passed.
@@ -32,14 +32,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from kihc.config import DEFAULT_DB_PATH, EVIDENCE_DIR  # noqa: E402
-from kihc.core.audio import ffmpeg_exe  # noqa: E402
-from kihc.core.library import ingest_bytes, scan_bytes, timecode  # noqa: E402
-from kihc.core.pod_analyzer import cluster_occurrences_into_pods  # noqa: E402
-from kihc.core.proof import verify_row  # noqa: E402
-from kihc.database.schema import init_db  # noqa: E402
-from kihc.reports.certificate import certificate_for  # noqa: E402
-from kihc.service.sysinfo import memory_mb  # noqa: E402
+from spotly.config import DEFAULT_DB_PATH, EVIDENCE_DIR  # noqa: E402
+from spotly.core.audio import ffmpeg_exe  # noqa: E402
+from spotly.core.library import ingest_bytes, scan_bytes, timecode  # noqa: E402
+from spotly.core.pod_analyzer import cluster_occurrences_into_pods  # noqa: E402
+from spotly.core.proof import verify_row  # noqa: E402
+from spotly.database.schema import init_db  # noqa: E402
+from spotly.reports.certificate import certificate_for  # noqa: E402
+from spotly.service.sysinfo import memory_mb  # noqa: E402
 
 SR = 44100
 CHANNEL = "El-Heddaf TV (synthetic pilot)"
@@ -218,7 +218,7 @@ def run(workdir: Path) -> tuple[Report, list, list]:
 
 def print_report(rep, rows, ads, workdir, kept):
     line = "─" * 96
-    print(f"\n{line}\n KIHC MARKET PILOT · {CHANNEL} · {LABEL} (test tones, not real airings)\n{line}")
+    print(f"\n{line}\n Spotly MARKET PILOT · {CHANNEL} · {LABEL} (test tones, not real airings)\n{line}")
     print(f" {'Step':<30} {'Result':<7} Detail")
     print(f" {'-' * 30} {'-' * 7} {'-' * 56}")
     for step, ok, detail in rep.rows:
@@ -242,7 +242,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     before = fingerprint_production()
-    workdir = Path(tempfile.mkdtemp(prefix="kihc_pilot_"))
+    workdir = Path(tempfile.mkdtemp(prefix="spotly_pilot_"))
     try:
         rep, rows, ads = run(workdir)
     except Exception as exc:                       # report, never leave a half-written workspace silently
@@ -253,7 +253,7 @@ def main(argv=None):
               if before[0] == after[0] else "PRODUCTION DATABASE CHANGED")
     rep.check("Production evidence untouched", before[1] == after[1], f"{len(after[1])} files, no additions"
               if before[1] == after[1] else f"evidence folder changed: {set(after[1]) ^ set(before[1])}")
-    if not args.keep and workdir.name.startswith("kihc_pilot_"):
+    if not args.keep and workdir.name.startswith("spotly_pilot_"):
         shutil.rmtree(workdir, ignore_errors=True)
     print_report(rep, rows, ads, workdir, args.keep)
     return 0 if rep.passed else 1

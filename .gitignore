@@ -2,14 +2,14 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-kihc/data/channel_overrides.json
-kihc/data/*.lock
-kihc/data/*.db*
+spotly/data/channel_overrides.json
+spotly/data/*.lock
+spotly/data/*.db*
 evidence/
 logs/
 # large / runtime artefacts (not source): model weights, DB backups, runtime state, caches
-kihc/data/models/
-kihc/data/backups/
-kihc/data/state/
-kihc/data/iptv_cache/
-kihc/data/discovered_ads/
+spotly/data/models/
+spotly/data/backups/
+spotly/data/state/
+spotly/data/iptv_cache/
+spotly/data/discovered_ads/

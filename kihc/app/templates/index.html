@@ -3,361 +3,475 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>KIHC · Broadcast Intelligence</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2310B981'/><text x='16' y='22' font-size='17' font-family='Arial' font-weight='700' text-anchor='middle' fill='%2304251F'>K</text></svg>">
+  <title>KIHC · Broadcast Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%234F46E5'/><text x='16' y='22' font-size='17' font-family='Arial' font-weight='700' text-anchor='middle' fill='%23ffffff'>K</text></svg>">
   <!-- Phase 31.1: every script is vendored under /static/vendor (Tailwind 3.4.16 Play runtime, Chart.js 4.4.1, Lucide 0.453.0): no CDN -->
   <script src="/static/vendor/tailwind.play.js"></script>
   <script>
     tailwind.config = { theme: { extend: {
-      colors: { petrol: '#072A27', petrol2: '#041B19', canvas: '#F4F7F6', line: '#E5EBEA', mint: '#10B981',
-                mintsoft: '#E6F7F0', minting: '#047857', ink: '#111827', muted: '#6B7280', radar: '#0B1E1E' },
-      borderRadius: { bento: '20px' },
-      boxShadow: { bento: '0 4px 20px rgba(0,0,0,0.04)' },
-      fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'sans-serif'] } } } };
+      colors: { canvas: '#F8FAFC', line: '#E2E8F0', ink: '#0F172A', muted: '#64748B', brand: '#4F46E5', brand2: '#6366F1',
+                mint: '#10B981', mintsoft: '#ECFDF5', minting: '#047857', petrol: '#4F46E5', petrol2: '#4338CA', radar: '#F8FAFC' },
+      borderRadius: { bento: '18px' },
+      boxShadow: { bento: '0 1px 2px rgba(15,23,42,.04), 0 4px 14px rgba(15,23,42,.04)' },
+      fontFamily: { sans: ['ui-sans-serif', 'system-ui', 'Segoe UI', 'Helvetica Neue', 'Arial', 'sans-serif'] } } } };
   </script>
   <!-- async: a slow chart or icon script must never block the app (numbers render without them) -->
   <script src="/static/vendor/chart.umd.min.js" async onload="window.kihcLibsReady && kihcLibsReady()"></script>
   <script src="/static/vendor/lucide.min.js" async onload="window.kihcLibsReady && kihcLibsReady()"></script>
   <script src="/static/app.js" defer></script>
   <style>
-    .bento { background:#fff; border:1px solid #E5EBEA; border-radius:20px; box-shadow:0 4px 20px rgba(0,0,0,.04); }
-    .pill { display:inline-flex; align-items:center; gap:4px; border-radius:12px; padding:2px 10px; font-size:.8rem; font-weight:600; }
+    html { scroll-behavior: smooth; scroll-padding-top: 5.5rem; }
+    .bento { background:#fff; border:1px solid #E2E8F0; border-radius:18px; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 4px 14px rgba(15,23,42,.04); }
+    .lift { transition: box-shadow .25s ease, transform .25s ease; }
+    .lift:hover { box-shadow:0 2px 4px rgba(15,23,42,.05), 0 14px 30px rgba(15,23,42,.09); transform: translateY(-1px); }
+    .pill { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:2px 10px; font-size:.75rem; font-weight:600; line-height:1.25rem; }
     .num { font-variant-numeric: tabular-nums; }
-    [data-lucide] { width:1.05em; height:1.05em; stroke-width:2.2; }
-    dialog::backdrop { background: rgba(4,27,25,.6); backdrop-filter: blur(2px); }
-    .bar-fill { transition: width .6s ease; }
+    .eyebrow { font-size:.6875rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:#64748B; }
+    .ibadge { width:2.5rem; height:2.5rem; border-radius:12px; display:flex; align-items:center; justify-content:center; flex:none; }
+    .ibadge [data-lucide], .ibadge svg { width:1.15rem; height:1.15rem; }
+    [data-lucide] { width:1.05em; height:1.05em; stroke-width:2; }
+    .bar-fill { transition: width .6s cubic-bezier(.4,0,.2,1), background-color .4s ease; }
+    .nav-link { display:flex; align-items:center; gap:.75rem; padding:.45rem .6rem; border-radius:12px; font-size:.875rem; font-weight:500; color:#475569; transition: background-color .15s, color .15s; }
+    .nav-link:hover { background:#F1F5F9; color:#0F172A; }
+    .nav-link.active { background:#EEF2FF; color:#4338CA; font-weight:600; }
+    .field { border:1px solid #E2E8F0; background:#fff; border-radius:12px; padding:.45rem .75rem; font-size:.875rem; color:#0F172A; }
+    .field:focus { outline:none; border-color:#6366F1; box-shadow:0 0 0 3px rgba(99,102,241,.18); }
+    .btn-primary { background:#4F46E5; color:#fff; font-weight:600; border-radius:12px; transition: background-color .15s, box-shadow .15s; box-shadow:0 1px 2px rgba(79,70,229,.3); }
+    .btn-primary:hover:not(:disabled) { background:#4338CA; }
+    .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+    .btn-soft { background:#fff; color:#334155; font-weight:600; border:1px solid #E2E8F0; border-radius:12px; transition: background-color .15s; }
+    .btn-soft:hover:not(:disabled) { background:#F8FAFC; }
+    dialog { border:1px solid rgba(255,255,255,.7); background:rgba(255,255,255,.82); backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4);
+             box-shadow:0 24px 60px rgba(15,23,42,.22); border-radius:22px; color:#0F172A; }
+    dialog::backdrop { background: rgba(15,23,42,.28); backdrop-filter: blur(6px); }
+    .glass-row { border-color:rgba(226,232,240,.8) !important; }
+    ::-webkit-scrollbar { width:10px; height:10px; } ::-webkit-scrollbar-thumb { background:#CBD5E1; border-radius:10px; border:3px solid transparent; background-clip:content-box; }
   </style>
 </head>
 <body class="bg-canvas text-ink font-sans antialiased">
 
 <!-- ===================== sidebar ===================== -->
-<aside class="lg:fixed lg:inset-y-0 lg:left-0 lg:w-72 bg-gradient-to-b from-petrol to-petrol2 text-emerald-50 flex flex-col p-5 gap-5 lg:overflow-y-auto">
+<aside class="lg:fixed lg:inset-y-0 lg:left-0 lg:w-64 bg-white border-b lg:border-b-0 lg:border-r border-line flex flex-col p-5 gap-5 lg:overflow-y-auto z-40">
   <div class="flex items-center gap-3">
-    <div class="w-10 h-10 rounded-xl bg-mint text-petrol2 font-extrabold flex items-center justify-center text-lg">K</div>
-    <div><div class="font-bold text-white text-lg leading-tight">KIHC</div>
-      <div class="text-xs text-emerald-200/70">Broadcast Intelligence</div></div>
+    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 text-white font-extrabold flex items-center justify-center text-lg shadow-sm">K</div>
+    <div><div class="font-bold text-ink text-lg leading-tight">KIHC</div>
+      <div class="text-xs text-muted">Broadcast Intelligence</div></div>
   </div>
 
-  <div id="engine-pill" class="rounded-2xl px-4 py-3 text-sm bg-white/5 border border-white/10">
-    <div class="flex items-center gap-2 font-semibold"><span id="engine-dot" class="w-2.5 h-2.5 rounded-full bg-gray-400"></span>
+  <nav class="flex flex-col gap-1" aria-label="Sections">
+    <div class="eyebrow px-2 mb-1">Workspace</div>
+    <a href="#sec-overview" class="nav-link active" data-nav="sec-overview"><span class="ibadge !w-8 !h-8 !rounded-lg bg-indigo-50 text-indigo-600"><i data-lucide="layout-dashboard"></i></span>Overview</a>
+    <a href="#sec-radar" class="nav-link" data-nav="sec-radar"><span class="ibadge !w-8 !h-8 !rounded-lg bg-emerald-50 text-emerald-600"><i data-lucide="radio-tower"></i></span>Live radar</a>
+    <a href="#sec-sov" class="nav-link" data-nav="sec-sov"><span class="ibadge !w-8 !h-8 !rounded-lg bg-violet-50 text-violet-600"><i data-lucide="pie-chart"></i></span>Share of voice</a>
+    <a href="#sec-compliance" class="nav-link" data-nav="sec-compliance"><span class="ibadge !w-8 !h-8 !rounded-lg bg-amber-50 text-amber-600"><i data-lucide="shield-check"></i></span>Compliance</a>
+    <a href="#sec-creative" class="nav-link" data-nav="sec-creative"><span class="ibadge !w-8 !h-8 !rounded-lg bg-rose-50 text-rose-500"><i data-lucide="sparkles"></i></span>Creative</a>
+    <a href="#sec-detections" class="nav-link" data-nav="sec-detections"><span class="ibadge !w-8 !h-8 !rounded-lg bg-sky-50 text-sky-600"><i data-lucide="list-checks"></i></span>Detections</a>
+  </nav>
+
+  <div id="engine-pill" class="rounded-2xl px-4 py-3 text-sm bg-slate-50 border border-line">
+    <div class="flex items-center gap-2 font-semibold text-ink"><span id="engine-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
       <span id="engine-label">Checking engine…</span></div>
-    <div id="engine-sub" class="text-xs text-emerald-200/70 mt-1"></div>
+    <div id="engine-sub" class="text-xs text-muted mt-1"></div>
   </div>
 
   <section class="flex flex-col gap-2">
-    <div class="text-xs uppercase tracking-wider text-emerald-200/60 font-semibold">Live monitoring</div>
+    <div class="eyebrow px-1">Live monitoring</div>
     <label for="channel-select" class="sr-only">Channel</label>
-    <select id="channel-select" class="w-full rounded-xl bg-white/10 border border-white/15 text-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mint">
+    <select id="channel-select" class="field w-full">
       <option>Loading channels…</option>
     </select>
-    <button id="toggle-btn" type="button" class="w-full rounded-xl bg-mint text-petrol2 font-bold py-2 text-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+    <button id="toggle-btn" type="button" class="btn-primary w-full py-2 text-sm flex items-center justify-center gap-2">
       <i data-lucide="play"></i><span>Start monitoring</span></button>
-    <div id="toggle-msg" class="text-xs text-emerald-200/80 min-h-[1rem]" role="status" aria-live="polite"></div>
+    <div id="toggle-msg" class="text-xs text-muted min-h-[1rem]" role="status" aria-live="polite"></div>
     <ul id="monitor-list" class="flex flex-col gap-1 text-sm"></ul>
   </section>
 
-  <details class="mt-auto rounded-2xl bg-white/5 border border-white/10 px-4 py-3 text-xs">
-    <summary class="cursor-pointer font-semibold text-emerald-100 flex items-center gap-2"><i data-lucide="activity"></i>Diagnostics</summary>
-    <dl id="diag" class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-emerald-200/80"></dl>
+  <details class="mt-auto rounded-2xl bg-slate-50 border border-line px-4 py-3 text-xs">
+    <summary class="cursor-pointer font-semibold text-slate-700 flex items-center gap-2"><i data-lucide="activity"></i>Diagnostics</summary>
+    <dl id="diag" class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-muted"></dl>
   </details>
 </aside>
 
 <!-- ===================== main canvas ===================== -->
-<main class="lg:ml-72 p-4 sm:p-6 lg:p-8 max-w-[1500px]">
-  <header class="flex flex-wrap items-end justify-between gap-4 mb-6">
-    <div>
-      <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight">Broadcast Intelligence</h1>
-      <span id="stream-pill" class="pill bg-gray-100 text-gray-600 mt-2" role="status" aria-live="polite">⚪ No live feed</span>
-      <p class="text-muted text-sm mt-1">Detected airings, share of voice and break placement across monitored channels.
-        Airings are not audience impressions.</p>
-    </div>
-    <div class="flex items-end gap-3">
-      <button id="master-open" type="button" class="rounded-xl bg-petrol text-white font-semibold px-4 py-2 text-sm hover:brightness-125 flex items-center gap-2">
-        <i data-lucide="upload"></i>Upload Master Asset</button>
-      <button id="contract-open" type="button" class="rounded-xl bg-white border border-line text-petrol font-semibold px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2">
-        <i data-lucide="file-check"></i>Contract</button>
-      <div>
-        <label for="industry-select" class="block text-xs font-semibold text-muted mb-1">SOV industry</label>
-        <select id="industry-select" class="rounded-xl border border-line bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-mint"></select>
+<div class="lg:ml-64">
+  <!-- top bar -->
+  <header class="sticky top-0 z-30 bg-white/80 backdrop-blur-md border-b border-line">
+    <div class="flex items-center justify-between gap-4 px-4 sm:px-6 lg:px-8 h-16 max-w-[1500px]">
+      <nav class="text-sm flex items-center gap-2 min-w-0" aria-label="Breadcrumb">
+        <span class="text-muted">KIHC</span><span class="text-slate-300">/</span><span class="font-semibold text-ink truncate">Broadcast Dashboard</span>
+      </nav>
+      <div class="flex items-center gap-3">
+        <label class="relative hidden sm:block">
+          <span class="sr-only">Search detections and creatives</span>
+          <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+          <input id="global-search" type="search" placeholder="Search brands, channels…" autocomplete="off"
+                 class="field !rounded-full !pl-9 !py-1.5 w-64 bg-slate-50">
+        </label>
+        <button id="bell-btn" type="button" class="relative w-10 h-10 rounded-full bg-white border border-line flex items-center justify-center text-slate-600 hover:bg-slate-50" aria-label="Open alerts">
+          <i data-lucide="bell"></i>
+          <span id="bell-badge" class="hidden absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center">0</span>
+        </button>
+        <div class="flex items-center gap-2.5 pl-3 border-l border-line">
+          <div class="w-9 h-9 rounded-full bg-gradient-to-br from-violet-400 to-indigo-500 text-white font-bold text-sm flex items-center justify-center" aria-hidden="true">MD</div>
+          <div class="hidden md:block leading-tight"><div class="text-sm font-semibold">Media Director</div><div class="text-[11px] text-muted">Executive view</div></div>
+        </div>
       </div>
-      <div class="text-xs text-muted pb-2 flex items-center gap-1"><span id="conn-dot" class="w-2 h-2 rounded-full bg-gray-300"></span><span id="updated">connecting…</span></div>
     </div>
   </header>
 
-  <div id="offline-banner" class="hidden mb-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 text-sm">
-    Can't reach the KIHC server — showing the last data received. Retrying…</div>
-
-  <!-- ROW 1: KPIs -->
-  <section class="grid grid-cols-1 md:grid-cols-3 gap-5 mb-5">
-    <article class="bento p-6">
-      <div class="text-xs font-semibold uppercase tracking-wider text-muted">Total airings</div>
-      <div class="flex items-end justify-between gap-3 mt-1">
-        <div><div id="kpi-total" class="num text-4xl font-bold">—</div>
-          <span id="kpi-total-badge" class="pill bg-gray-100 text-gray-600 mt-2">—</span></div>
-        <div class="relative w-36 h-12"><canvas id="chart-perday" aria-label="Detections per day, last 14 days" role="img"></canvas></div>
-      </div>
-      <div class="text-xs text-muted mt-3">Detections logged per day, last 14 days</div>
-    </article>
-    <article class="bento p-6">
-      <div class="text-xs font-semibold uppercase tracking-wider text-muted">Avg match confidence</div>
-      <div class="num text-4xl font-bold mt-1"><span id="kpi-conf">—</span><span class="text-base text-muted font-semibold ml-1">%</span></div>
-      <span id="kpi-conf-delta" class="pill bg-gray-100 text-gray-600 mt-2">—</span>
-      <div class="text-xs text-muted mt-3">1 − bit error rate · threshold 82% (files) / 80% (live)</div>
-    </article>
-    <article class="bento p-6">
-      <div class="text-xs font-semibold uppercase tracking-wider text-muted">Client share of voice · <span id="kpi-sov-industry">—</span></div>
-      <div class="num text-4xl font-bold mt-1"><span id="kpi-sov">—</span><span class="text-base text-muted font-semibold ml-1">%</span></div>
-      <span id="kpi-sov-leader" class="pill bg-gray-100 text-gray-600 mt-2">—</span>
-      <div id="kpi-sov-sub" class="text-xs text-muted mt-3">—</div>
-    </article>
-  </section>
-
-  <!-- ROW 1b: financial estimates (rate card x detected airings) -->
-  <section aria-labelledby="fin-heading" class="mb-5">
-    <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
-      <h2 id="fin-heading" class="text-sm font-bold uppercase tracking-wider text-muted flex items-center gap-2">
-        <i data-lucide="landmark"></i>Spend intelligence <span id="fin-status" class="pill bg-amber-50 text-amber-800 normal-case tracking-normal">rate card: …</span></h2>
-      <div class="inline-flex rounded-xl border border-line bg-white p-1 text-sm" role="group" aria-label="Spend basis">
-        <button type="button" data-fin-mode="gross" class="fin-mode px-3 py-1 rounded-lg font-semibold">Gross (tarif plaquette)</button>
-        <button type="button" data-fin-mode="net" class="fin-mode px-3 py-1 rounded-lg font-semibold">Est. net</button>
-      </div>
-    </div>
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
-      <article class="bento p-6">
-        <div class="text-xs font-semibold uppercase tracking-wider text-muted">Tracked market investment <span id="fin-basis-label">(gross)</span></div>
-        <div class="num text-3xl font-bold mt-1"><span id="fin-total">—</span> <span class="text-base text-muted font-semibold">DZD</span></div>
-        <span id="fin-total-badge" class="pill bg-gray-100 text-gray-600 mt-2">—</span>
-        <div id="fin-total-sub" class="text-xs text-muted mt-3">—</div>
-      </article>
-      <article class="bento p-6">
-        <div class="text-xs font-semibold uppercase tracking-wider text-muted">Top spender · share of spend</div>
-        <div id="fin-top" class="text-2xl font-bold mt-1 truncate">—</div>
-        <div class="flex flex-wrap gap-2 mt-2"><span id="fin-sos" class="pill bg-mintsoft text-minting">SOS —</span>
-          <span id="fin-sov" class="pill bg-gray-100 text-gray-600">SOV —</span></div>
-        <div id="fin-top-sub" class="text-xs text-muted mt-3">—</div>
-      </article>
-      <article class="bento p-6">
-        <div class="text-xs font-semibold uppercase tracking-wider text-muted">Reclaimable breach credits</div>
-        <div class="num text-3xl font-bold mt-1"><span id="fin-credit">—</span> <span class="text-base text-muted font-semibold">DZD</span></div>
-        <span id="fin-credit-badge" class="pill bg-gray-100 text-gray-600 mt-2">—</span>
-        <div id="fin-credit-sub" class="text-xs text-muted mt-3">—</div>
-      </article>
-    </div>
-    <p id="fin-note" class="text-xs text-muted mt-2">Estimates: configured rate card × detected airings (live detections with a broadcast time).</p>
-  </section>
-
-  <!-- ROW 2: analytics -->
-  <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mb-5">
-    <article class="bento p-6">
-      <h2 class="font-bold">Premium pod placement</h2>
-      <p id="premium-sub" class="text-xs text-muted">First + Last in break</p>
-      <div class="relative h-40 mt-3"><canvas id="chart-premium" aria-label="Premium placement gauge" role="img"></canvas>
-        <div class="absolute inset-x-0 bottom-3 text-center pointer-events-none">
-          <div id="premium-pct" class="num text-3xl font-bold">—</div>
-          <div id="premium-n" class="text-xs text-muted">—</div></div></div>
-    </article>
-    <article class="bento p-6">
-      <h2 class="font-bold">Channel distribution</h2>
-      <p class="text-xs text-muted">Share of detected airings</p>
-      <ul id="channel-list" class="mt-4 flex flex-col gap-3"></ul>
-    </article>
-    <article class="bento p-6 md:col-span-2">
-      <h2 class="font-bold">Commercial break clutter</h2>
-      <p id="clutter-sub" class="text-xs text-muted">—</p>
-      <div class="relative h-44 mt-3"><canvas id="chart-clutter" aria-label="Average detected ads per break" role="img"></canvas></div>
-    </article>
-  </section>
-
-  <!-- ROW 3: radar + certificate -->
-  <section class="grid grid-cols-1 xl:grid-cols-5 gap-5 mb-5">
-    <article class="xl:col-span-3 rounded-bento bg-radar text-emerald-50 p-6 shadow-bento border border-[#13302E]">
-      <div class="flex items-center justify-between">
-        <h2 class="text-xl font-bold flex items-center gap-2"><i data-lucide="radio-tower"></i>Live Broadcast Radar</h2>
-        <span id="radar-count" class="pill bg-emerald-400/15 text-emerald-300">0 channels</span>
-      </div>
-      <div id="radar-list" class="mt-4 flex flex-col gap-3"></div>
-      <p id="radar-empty" class="text-sm text-emerald-200/70 mt-3">No live monitors running. Start one from the sidebar, or run the 24/7 engine:
-        <code class="bg-white/10 rounded px-1">scripts\start_monitoring_service.bat</code></p>
-    </article>
-    <article class="xl:col-span-2 rounded-bento p-6 text-white shadow-lg bg-gradient-to-br from-emerald-800 to-mint">
-      <h2 class="text-xl font-bold flex items-center gap-2"><i data-lucide="shield-check"></i>Airing Certificate Authority</h2>
-      <p class="text-sm text-emerald-50/90 mt-1">SHA-256 tamper-evident proof of performance for any detected airing, as a one-page PDF.</p>
-      <label for="cert-select" class="block text-xs font-semibold mt-4 mb-1 text-emerald-50">Airing</label>
-      <select id="cert-select" class="w-full rounded-xl bg-white text-ink px-3 py-2 text-sm"><option>No airings yet</option></select>
-      <div id="cert-integrity" class="mt-3 text-sm font-semibold">—</div>
-      <div id="cert-hash" class="mt-1 font-mono text-[11px] break-all text-emerald-50/80"></div>
-      <a id="cert-download" href="#" aria-disabled="true"
-         class="mt-4 flex items-center justify-center gap-2 rounded-xl bg-white text-emerald-800 font-bold py-2.5 text-sm hover:bg-emerald-50 aria-disabled:opacity-50 aria-disabled:pointer-events-none">
-        <i data-lucide="file-down"></i>Generate SHA-256 Airing Certificate (PDF)</a>
-      <a id="fin-export" href="/api/financials/export/csv"
-         class="mt-2 flex items-center justify-center gap-2 rounded-xl border border-white/60 text-white font-bold py-2.5 text-sm hover:bg-white/10">
-        <i data-lucide="sheet"></i>📥 Export Financial Audit (.CSV)</a>
-    </article>
-  </section>
-
-  <!-- ROW 3a: contract compliance, competitor separation, SOV, alerts (Phase 12.1) -->
-  <section class="bento p-6 mb-5" aria-labelledby="comp-heading">
-    <div class="flex flex-wrap items-center justify-between gap-3">
+  <main class="p-4 sm:p-6 lg:p-8 max-w-[1500px]">
+    <!-- page title + toolbar -->
+    <div class="flex flex-wrap items-end justify-between gap-4 mb-6" id="sec-overview">
       <div>
-        <h2 id="comp-heading" class="font-bold flex items-center gap-2"><i data-lucide="shield-check"></i>Contract compliance &amp; competitor separation</h2>
-        <p class="text-xs text-muted mt-1">Confirmed airings audited against contract clauses (booked position, same-sector separation).
-          Credits are claimable pending the broadcaster's as-run log; DZD follows the rate card status.</p>
-      </div>
-      <div class="flex items-center gap-2">
-        <span id="comp-card-status" class="pill bg-gray-100 text-gray-600">rate card —</span>
-        <a id="comp-csv" href="/api/compliance/export/csv"
-           class="rounded-lg border border-line px-3 py-1.5 text-xs font-semibold hover:bg-gray-50">📥 Make-good claim sheet (.CSV)</a>
-      </div>
-    </div>
-    <div class="flex flex-wrap gap-2 mt-4" aria-live="polite">
-      <span id="comp-pct" class="pill bg-gray-100 text-gray-600">Compliance —</span>
-      <span id="comp-breaches" class="pill bg-gray-100 text-gray-600">Breaches —</span>
-      <span id="comp-reclaim" class="pill bg-gray-100 text-gray-600">Reclaimable —</span>
-      <span id="comp-conflicts" class="pill bg-gray-100 text-gray-600">Separation conflicts —</span>
-      <span id="comp-tracks" class="pill bg-gray-100 text-gray-600">Tracks —</span>
-      <span id="comp-sov" class="pill bg-gray-100 text-gray-600">My SOV 24 h —</span>
-    </div>
-    <div class="grid gap-5 mt-5 lg:grid-cols-2">
-      <div>
-        <h3 class="text-xs uppercase tracking-wider text-muted mb-2 flex items-center justify-between">Live alerts
-          <span id="comp-alert-count" class="pill bg-gray-100 text-gray-600">0</span></h3>
-        <ul id="comp-alerts" class="flex flex-col gap-2 max-h-72 overflow-y-auto text-sm">
-          <li class="text-muted text-xs">No open alerts.</li>
-        </ul>
-      </div>
-      <div>
-        <div class="flex items-center justify-between mb-2 gap-2">
-          <h3 class="text-xs uppercase tracking-wider text-muted">Share of voice · 7 days (detected airtime)</h3>
-          <label class="text-xs text-muted flex items-center gap-1"><input id="sov-provisional" type="checkbox"> include unconfirmed</label>
+        <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Broadcast Dashboard</h1>
+        <div class="flex flex-wrap items-center gap-2 mt-2">
+          <span id="stream-pill" class="pill bg-slate-100 text-slate-600" role="status" aria-live="polite">⚪ No live feed</span>
+          <span class="text-muted text-sm">Detected airings, share of voice and break placement · airings are not audience impressions.</span>
         </div>
-        <div class="relative h-56"><canvas id="sov-chart" aria-label="Share of voice by day"></canvas></div>
-        <p id="sov-note" class="text-[11px] text-muted mt-1"></p>
+      </div>
+      <div class="flex flex-wrap items-end gap-3">
+        <button id="master-open" type="button" class="btn-primary px-4 py-2 text-sm flex items-center gap-2"><i data-lucide="upload"></i>Upload Master Asset</button>
+        <button id="contract-open" type="button" class="btn-soft px-4 py-2 text-sm flex items-center gap-2"><i data-lucide="file-check"></i>Contract</button>
+        <div>
+          <label for="industry-select" class="block text-[11px] font-semibold text-muted mb-1">SOV industry</label>
+          <select id="industry-select" class="field !py-2"></select>
+        </div>
+        <div class="text-xs text-muted pb-2.5 flex items-center gap-1.5"><span id="conn-dot" class="w-2 h-2 rounded-full bg-slate-300"></span><span id="updated">connecting…</span></div>
       </div>
     </div>
-    <details class="mt-5" id="comp-setup-box">
-      <summary class="cursor-pointer text-sm font-semibold">Setup · sectors &amp; contract clauses <span id="comp-setup-hint" class="text-xs text-amber-700"></span></summary>
-      <div class="grid gap-5 mt-3 lg:grid-cols-2 text-xs">
-        <div>
-          <h4 class="font-semibold mb-1">Sectors of confirmed brands</h4>
-          <p class="text-muted mb-2">Separation compares brands of the same sector (e.g. Biscuits, Mineral water, Telecom). Without one, a brand is not assessable.</p>
-          <ul id="comp-sectors" class="flex flex-col gap-1"></ul>
+
+    <div id="offline-banner" class="hidden mb-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 px-4 py-3 text-sm">
+      Can't reach the KIHC server — showing the last data received. Retrying…</div>
+
+    <!-- ROW 1: four KPI cards -->
+    <section class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mb-5" aria-label="Key metrics">
+      <!-- Active channels -->
+      <article class="bento lift p-5 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="ibadge bg-indigo-50 text-indigo-600"><i data-lucide="radio-tower"></i></span>
+          <span id="kpi-live-badge" class="pill bg-slate-100 text-slate-600">Checking fleet…</span>
         </div>
-        <div>
-          <h4 class="font-semibold mb-1">Contract clauses</h4>
-          <ul id="comp-contracts" class="flex flex-col gap-1 mb-2"></ul>
-          <div class="grid grid-cols-2 gap-1">
-            <select id="cc-brand" class="border border-line rounded-lg px-2 py-1" aria-label="Brand"></select>
-            <select id="cc-position" class="border border-line rounded-lg px-2 py-1" aria-label="Booked position">
-              <option value="ANY">Any position</option><option value="FIRST">Booked FIRST</option><option value="LAST">Booked LAST</option></select>
-            <input id="cc-sep" type="number" min="0" max="3600" value="180" class="border border-line rounded-lg px-2 py-1" aria-label="Separation seconds" placeholder="Separation (s)">
-            <input id="cc-credit" type="number" min="0" max="100" value="100" class="border border-line rounded-lg px-2 py-1" aria-label="Separation credit %" placeholder="Credit %">
-            <button id="cc-add" type="button" class="col-span-2 rounded-lg bg-mint text-petrol2 font-bold py-1">Add / replace clause</button>
+        <div class="eyebrow mt-4">Active channels</div>
+        <div class="num text-3xl font-bold mt-1"><span id="kpi-live">—</span> <span class="text-base font-semibold text-muted">Live</span></div>
+        <div id="kpi-live-sub" class="text-xs text-muted mt-auto pt-3">Waiting for the engine…</div>
+      </article>
+      <!-- Verified airings -->
+      <article class="bento lift p-5 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="ibadge bg-emerald-50 text-emerald-600"><i data-lucide="badge-check"></i></span>
+          <span id="kpi-conf-pill" class="pill !gap-0 bg-emerald-50 text-emerald-700"><span id="kpi-conf">—</span><span id="kpi-conf-unit">%</span><span id="kpi-conf-tail"> match</span></span>
+        </div>
+        <div class="eyebrow mt-4">Verified airings</div>
+        <div class="flex items-end justify-between gap-3 mt-1">
+          <div id="kpi-total" class="num text-3xl font-bold">—</div>
+          <div class="relative w-28 h-10"><canvas id="chart-perday" aria-label="Detections per day, last 14 days" role="img"></canvas></div>
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5 mt-auto pt-3">
+          <span id="kpi-total-badge" class="pill bg-slate-100 text-slate-600">—</span>
+          <span id="kpi-conf-delta" class="pill bg-slate-100 text-slate-600">—</span>
+        </div>
+      </article>
+      <!-- Tracked spend -->
+      <article class="bento lift p-5 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="ibadge bg-amber-50 text-amber-600"><i data-lucide="wallet"></i></span>
+          <div class="inline-flex rounded-full border border-line bg-slate-50 p-0.5 text-[11px]" role="group" aria-label="Spend basis">
+            <button type="button" data-fin-mode="gross" class="fin-mode px-2.5 py-0.5 rounded-full font-semibold">Gross</button>
+            <button type="button" data-fin-mode="net" class="fin-mode px-2.5 py-0.5 rounded-full font-semibold">Est. net</button>
           </div>
-          <p id="cc-msg" class="text-muted mt-1 min-h-[1rem]"></p>
+        </div>
+        <div class="eyebrow mt-4">Tracked spend (DZD) <span id="fin-basis-label" class="normal-case tracking-normal font-medium">(gross)</span></div>
+        <div class="num text-3xl font-bold mt-1"><span id="fin-total">—</span></div>
+        <div class="flex flex-wrap items-center gap-1.5 mt-2">
+          <span id="fin-total-badge" class="pill bg-slate-100 text-slate-600">—</span>
+          <span id="fin-status" class="pill bg-amber-50 text-amber-700">rate card: …</span>
+        </div>
+        <div id="fin-total-sub" class="text-xs text-muted mt-2">—</div>
+        <div class="mt-auto pt-3 border-t border-line/70 mt-3">
+          <div class="eyebrow">Top spender</div>
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1 mt-0.5">
+            <div id="fin-top" class="text-sm font-bold">—</div>
+            <span id="fin-sos" class="pill bg-violet-50 text-violet-700">SOS —</span><span id="fin-sov" class="pill bg-slate-100 text-slate-600">SOV —</span>
+          </div>
+          <div id="fin-top-sub" class="text-[11px] text-muted mt-1">—</div>
+        </div>
+      </article>
+      <!-- Compliance & credits -->
+      <article class="bento lift p-5 flex flex-col">
+        <div class="flex items-center justify-between">
+          <span class="ibadge bg-violet-50 text-violet-600"><i data-lucide="shield-check"></i></span>
+          <span id="fin-credit-badge" class="pill bg-slate-100 text-slate-600">—</span>
+        </div>
+        <div class="eyebrow mt-4">Compliance &amp; credits</div>
+        <div class="num text-3xl font-bold mt-1"><span id="fin-credit">—</span> <span class="text-base font-semibold text-muted">DZD</span></div>
+        <div class="text-xs text-muted mt-1">Reclaimable breach credits</div>
+        <div id="fin-credit-sub" class="text-[11px] text-muted mt-auto pt-3">—</div>
+      </article>
+    </section>
+    <p id="fin-note" class="text-[11px] text-muted -mt-2 mb-5">Estimates: configured rate card × detected airings (live detections with a broadcast time).</p>
+
+    <!-- ROW 2: core intelligence grid -->
+    <section class="grid grid-cols-1 xl:grid-cols-5 gap-5 mb-5">
+      <!-- left: radar + pod placement + clutter -->
+      <div class="xl:col-span-3 flex flex-col gap-5" id="sec-radar">
+        <article class="bento p-5 sm:p-6">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <span class="ibadge bg-emerald-50 text-emerald-600"><i data-lucide="radio-tower"></i></span>
+              <div><h2 class="font-bold text-lg leading-tight">Live Broadcast Radar</h2>
+                <p class="text-xs text-muted">Real-time audio level per monitored channel</p></div>
+            </div>
+            <span id="radar-count" class="pill bg-emerald-50 text-emerald-700">0 channels</span>
+          </div>
+          <div id="radar-list" class="mt-5 flex flex-col gap-3"></div>
+          <div id="radar-empty" class="mt-4 rounded-2xl border border-dashed border-line bg-slate-50/70 px-4 py-6 text-center">
+            <div class="text-sm font-semibold text-slate-700">No live monitors running</div>
+            <p class="text-xs text-muted mt-1">Start one from the sidebar, or launch the 24/7 engine:
+              <code class="bg-white border border-line rounded px-1.5 py-0.5">scripts\start_monitoring_service.bat</code></p>
+          </div>
+        </article>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <article class="bento p-5 sm:p-6">
+            <h2 class="font-bold">Premium pod placement</h2>
+            <p id="premium-sub" class="text-xs text-muted">First + Last in break</p>
+            <div class="relative h-40 mt-3"><canvas id="chart-premium" aria-label="Premium placement gauge" role="img"></canvas>
+              <div class="absolute inset-x-0 bottom-3 text-center pointer-events-none">
+                <div id="premium-pct" class="num text-3xl font-bold">—</div>
+                <div id="premium-n" class="text-xs text-muted">—</div></div></div>
+          </article>
+          <article class="bento p-5 sm:p-6">
+            <h2 class="font-bold">Channel distribution</h2>
+            <p class="text-xs text-muted">Share of detected airings</p>
+            <ul id="channel-list" class="mt-4 flex flex-col gap-3"></ul>
+          </article>
+        </div>
+
+        <article class="bento p-5 sm:p-6">
+          <h2 class="font-bold">Commercial break clutter</h2>
+          <p id="clutter-sub" class="text-xs text-muted">—</p>
+          <div class="relative h-44 mt-3"><canvas id="chart-clutter" aria-label="Average detected ads per break" role="img"></canvas>
+            <div id="clutter-empty" class="hidden absolute inset-0 flex flex-col items-center justify-center text-center bg-white/90 rounded-xl">
+              <svg width="120" height="56" viewBox="0 0 120 56" fill="none" aria-hidden="true"><rect x="6" y="30" width="12" height="22" rx="6" fill="#E0E7FF"/><rect x="26" y="18" width="12" height="34" rx="6" fill="#C7D2FE"/><rect x="46" y="8" width="12" height="44" rx="6" fill="#A5B4FC"/><rect x="66" y="22" width="12" height="30" rx="6" fill="#C7D2FE"/><rect x="86" y="34" width="12" height="18" rx="6" fill="#E0E7FF"/><rect x="106" y="40" width="8" height="12" rx="4" fill="#EEF2FF"/></svg>
+              <div class="text-sm font-semibold text-slate-700 mt-2">Monitoring active</div>
+              <div class="text-xs text-muted">Break clutter appears once commercial blocks are reconstructed.</div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <!-- right: share of voice, competitor timeline, certificates -->
+      <div class="xl:col-span-2 flex flex-col gap-5">
+        <article class="bento p-5 sm:p-6" id="sec-sov">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <span class="ibadge bg-violet-50 text-violet-600"><i data-lucide="pie-chart"></i></span>
+              <div><h2 class="font-bold text-lg leading-tight">Share of Voice</h2>
+                <p class="text-xs text-muted">Detected airtime · last 7 days · <span id="kpi-sov-industry">all industries</span></p></div>
+            </div>
+            <label class="text-xs text-muted flex items-center gap-1.5 shrink-0 mt-1"><input id="sov-provisional" type="checkbox" class="accent-indigo-600"> include unconfirmed</label>
+          </div>
+          <div class="flex flex-wrap items-end gap-x-4 gap-y-1 mt-4">
+            <div class="num text-4xl font-bold"><span id="kpi-sov">—</span><span class="text-base text-muted font-semibold ml-1">%</span></div>
+            <div class="pb-1.5 flex flex-wrap gap-1.5"><span id="kpi-sov-leader" class="pill bg-slate-100 text-slate-600">—</span><span id="comp-sov" class="pill bg-slate-100 text-slate-600">My SOV 24 h —</span></div>
+          </div>
+          <div id="kpi-sov-sub" class="text-xs text-muted mt-1">—</div>
+          <div class="relative h-56 mt-4"><canvas id="sov-chart" aria-label="Share of voice by day"></canvas>
+            <div id="sov-empty" class="absolute inset-0 flex flex-col items-center justify-center text-center bg-white/90 rounded-xl">
+              <svg width="132" height="64" viewBox="0 0 132 64" fill="none" aria-hidden="true"><path d="M4 44 C 22 44, 22 18, 40 18 S 62 50, 80 34 S 106 8, 128 22" stroke="#C7D2FE" stroke-width="3" stroke-linecap="round"/><circle cx="40" cy="18" r="5" fill="#6366F1"/><circle cx="80" cy="34" r="5" fill="#A5B4FC"/><circle cx="128" cy="22" r="4" fill="#E0E7FF"/><rect x="4" y="54" width="124" height="4" rx="2" fill="#F1F5F9"/></svg>
+              <div class="text-sm font-semibold text-slate-700 mt-2">Monitoring active · Ingesting live commercial blocks</div>
+              <div class="text-xs text-muted">Share of voice builds up as airings are confirmed.</div>
+            </div>
+          </div>
+          <p id="sov-note" class="text-[11px] text-muted mt-2"></p>
+        </article>
+
+        <article class="bento p-5 sm:p-6">
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-3">
+              <span class="ibadge bg-amber-50 text-amber-600"><i data-lucide="swords"></i></span>
+              <div><h2 class="font-bold leading-tight">Competitor timeline</h2><p class="text-xs text-muted">Live alerts &amp; same-sector conflicts</p></div>
+            </div>
+            <span id="comp-alert-count" class="pill bg-slate-100 text-slate-600">0</span>
+          </div>
+          <ul id="comp-alerts" class="mt-4 flex flex-col gap-2 max-h-64 overflow-y-auto text-sm">
+            <li class="text-muted text-xs">No open alerts.</li>
+          </ul>
+          <h3 class="eyebrow mt-5 mb-2">Same-sector conflicts (&lt; 3 min apart, same channel)</h3>
+          <ul id="comp-conflict-list" class="text-xs flex flex-col gap-1.5"><li class="text-muted">None detected.</li></ul>
+        </article>
+
+        <article class="bento p-5 sm:p-6 bg-gradient-to-br from-indigo-50/80 to-white">
+          <div class="flex items-center gap-3">
+            <span class="ibadge bg-indigo-100 text-indigo-600"><i data-lucide="shield-check"></i></span>
+            <div><h2 class="font-bold leading-tight">Airing Certificate Authority</h2>
+              <p class="text-xs text-muted">SHA-256 tamper-evident proof of performance, one-page PDF.</p></div>
+          </div>
+          <label for="cert-select" class="block text-[11px] font-semibold text-muted mt-4 mb-1">Airing</label>
+          <select id="cert-select" class="field w-full"><option>No airings yet</option></select>
+          <div id="cert-integrity" class="mt-3 text-sm font-semibold">—</div>
+          <div id="cert-hash" class="mt-1 font-mono text-[11px] break-all text-muted"></div>
+          <a id="cert-download" href="#" aria-disabled="true"
+             class="btn-primary mt-4 flex items-center justify-center gap-2 py-2.5 text-sm aria-disabled:opacity-50 aria-disabled:pointer-events-none">
+            <i data-lucide="file-down"></i>Generate SHA-256 Airing Certificate (PDF)</a>
+          <a id="fin-export" href="/api/financials/export/csv" class="btn-soft mt-2 flex items-center justify-center gap-2 py-2.5 text-sm">
+            <i data-lucide="sheet"></i>📥 Export Financial Audit (.CSV)</a>
+        </article>
+      </div>
+    </section>
+
+    <!-- ROW 3: contract compliance -->
+    <section class="bento p-5 sm:p-6 mb-5" id="sec-compliance" aria-labelledby="comp-heading">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="ibadge bg-amber-50 text-amber-600"><i data-lucide="shield-check"></i></span>
+          <div>
+            <h2 id="comp-heading" class="font-bold text-lg leading-tight">Contract compliance &amp; competitor separation</h2>
+            <p class="text-xs text-muted mt-0.5">Confirmed airings audited against contract clauses (booked position, same-sector separation).
+              Credits are claimable pending the broadcaster's as-run log; DZD follows the rate card status.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="comp-card-status" class="pill bg-slate-100 text-slate-600">rate card —</span>
+          <a id="comp-csv" href="/api/compliance/export/csv" class="btn-soft px-3 py-1.5 text-xs">📥 Make-good claim sheet (.CSV)</a>
         </div>
       </div>
-    </details>
-    <div class="mt-4">
-      <h3 class="text-xs uppercase tracking-wider text-muted mb-2">Same-sector conflicts (&lt; 3 min apart, same channel)</h3>
-      <ul id="comp-conflict-list" class="text-xs flex flex-col gap-1"><li class="text-muted">None detected.</li></ul>
-    </div>
-  </section>
-
-  <!-- ROW 3b: unsupervised discovery -->
-  <section class="bento p-6 mb-5" aria-labelledby="disc-heading">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div>
-        <h2 id="disc-heading" class="font-bold flex items-center gap-2"><i data-lucide="sparkles"></i>Creative intelligence · discovered assets</h2>
-        <p class="text-xs text-muted mt-1">Recurring 15–60 s segments found without reference files. They may be ads, promos, idents or
-          programme material — confirm the commercials (My Brand / Competitor) to bring them into spend analytics, ignore the rest.
-          Creative health is a KIHC heuristic from one packshot frame, the transcript and break placement — not audience data.</p>
+      <div class="flex flex-wrap gap-2 mt-4" aria-live="polite">
+        <span id="comp-pct" class="pill bg-slate-100 text-slate-600">Compliance —</span>
+        <span id="comp-breaches" class="pill bg-slate-100 text-slate-600">Breaches —</span>
+        <span id="comp-reclaim" class="pill bg-slate-100 text-slate-600">Reclaimable —</span>
+        <span id="comp-conflicts" class="pill bg-slate-100 text-slate-600">Separation conflicts —</span>
+        <span id="comp-tracks" class="pill bg-slate-100 text-slate-600">Tracks —</span>
       </div>
-      <div class="flex items-center gap-2">
-        <select id="disc-filter" class="border border-line rounded-lg px-2 py-1 text-xs" aria-label="Filter assets">
-          <option value="open">To review</option><option value="all">All</option><option value="done">Classified / ignored</option>
-        </select>
-        <span id="disc-stats" class="pill bg-gray-100 text-gray-600">discovery idle</span>
-      </div>
-    </div>
-    <div id="disc-body" class="grid gap-4 mt-4 sm:grid-cols-2 xl:grid-cols-3">
-      <p class="text-sm text-muted">No recurring assets yet — discovery needs to hear a segment at least twice.</p>
-    </div>
-  </section>
+      <details class="mt-5 rounded-2xl border border-line bg-slate-50/60 px-4 py-3" id="comp-setup-box">
+        <summary class="cursor-pointer text-sm font-semibold">Setup · sectors &amp; contract clauses <span id="comp-setup-hint" class="text-xs text-amber-700"></span></summary>
+        <div class="grid gap-5 mt-3 lg:grid-cols-2 text-xs">
+          <div>
+            <h4 class="font-semibold mb-1">Sectors of confirmed brands</h4>
+            <p class="text-muted mb-2">Separation compares brands of the same sector (e.g. Biscuits, Mineral water, Telecom). Without one, a brand is not assessable.</p>
+            <ul id="comp-sectors" class="flex flex-col gap-1.5"></ul>
+          </div>
+          <div>
+            <h4 class="font-semibold mb-1">Contract clauses</h4>
+            <ul id="comp-contracts" class="flex flex-col gap-1 mb-2"></ul>
+            <div class="grid grid-cols-2 gap-2">
+              <select id="cc-brand" class="field !py-1 !text-xs" aria-label="Brand"></select>
+              <select id="cc-position" class="field !py-1 !text-xs" aria-label="Booked position">
+                <option value="ANY">Any position</option><option value="FIRST">Booked FIRST</option><option value="LAST">Booked LAST</option></select>
+              <input id="cc-sep" type="number" min="0" max="3600" value="180" class="field !py-1 !text-xs" aria-label="Separation seconds" placeholder="Separation (s)">
+              <input id="cc-credit" type="number" min="0" max="100" value="100" class="field !py-1 !text-xs" aria-label="Separation credit %" placeholder="Credit %">
+              <button id="cc-add" type="button" class="btn-primary col-span-2 py-1.5 text-xs">Add / replace clause</button>
+            </div>
+            <p id="cc-msg" class="text-muted mt-1 min-h-[1rem]"></p>
+          </div>
+        </div>
+      </details>
+    </section>
 
-  <!-- ROW 4: recent detections -->
-  <section class="bento p-6">
-    <div class="flex flex-wrap items-center justify-between gap-3"><h2 class="font-bold">Recent detections</h2>
-      <span class="text-xs text-muted">newest first · rejected detections excluded</span></div>
-    <form id="cert-batch" class="flex flex-wrap items-end gap-2 mt-3 text-xs" aria-label="Batch certificate export">
-      <label class="flex flex-col gap-1 font-semibold text-muted">From <input id="cb-start" type="date" class="border border-line rounded-lg px-2 py-1 font-normal text-ink"></label>
-      <label class="flex flex-col gap-1 font-semibold text-muted">To <input id="cb-end" type="date" class="border border-line rounded-lg px-2 py-1 font-normal text-ink"></label>
-      <label class="flex flex-col gap-1 font-semibold text-muted">Brand <input id="cb-brand" list="master-brands" maxlength="120" placeholder="all brands" class="border border-line rounded-lg px-2 py-1 font-normal text-ink"></label>
-      <a id="cb-go" href="/api/certificates/export-batch" class="rounded-lg bg-petrol text-white font-semibold px-3 py-1.5 hover:brightness-125">📦 Export certificates (ZIP)</a>
-    </form>
-    <div class="overflow-x-auto mt-3">
-      <table class="w-full text-sm">
-        <thead class="text-left text-xs uppercase tracking-wider text-muted border-b border-line">
-          <tr><th class="py-2 pr-3">#</th><th class="pr-3">Brand · campaign</th><th class="pr-3">Channel</th>
-            <th class="pr-3">Airing</th><th class="pr-3 text-right">Conf.</th><th class="pr-3">Integrity</th><th>PDF</th></tr>
-        </thead>
-        <tbody id="airings-body"></tbody>
-      </table>
-    </div>
-  </section>
-  <footer class="text-xs text-muted mt-6 mb-2">KIHC · data refreshes in place every 3–10 s · API docs at <a class="underline" href="/api/docs">/api/docs</a></footer>
-</main>
+    <!-- ROW 4: creative intelligence -->
+    <section class="bento p-5 sm:p-6 mb-5" id="sec-creative" aria-labelledby="disc-heading">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="ibadge bg-rose-50 text-rose-500"><i data-lucide="sparkles"></i></span>
+          <div>
+            <h2 id="disc-heading" class="font-bold text-lg leading-tight">Creative intelligence · discovered assets</h2>
+            <p class="text-xs text-muted mt-0.5 max-w-3xl">Recurring 15–60 s segments found without reference files. They may be ads, promos, idents or programme material —
+              confirm the commercials (My Brand / Competitor) to bring them into spend analytics, ignore the rest.
+              Creative health is a KIHC heuristic from one packshot frame, the transcript and break placement — not audience data.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <select id="disc-filter" class="field !py-1 !text-xs" aria-label="Filter assets">
+            <option value="open">To review</option><option value="all">All</option><option value="done">Classified / ignored</option>
+          </select>
+          <span id="disc-stats" class="pill bg-slate-100 text-slate-600">discovery idle</span>
+        </div>
+      </div>
+      <div id="disc-body" class="grid gap-4 mt-5 sm:grid-cols-2 xl:grid-cols-3">
+        <p class="text-sm text-muted">No recurring assets yet — discovery needs to hear a segment at least twice.</p>
+      </div>
+    </section>
+
+    <!-- ROW 5: recent detections -->
+    <section class="bento p-5 sm:p-6" id="sec-detections">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <span class="ibadge bg-sky-50 text-sky-600"><i data-lucide="list-checks"></i></span>
+          <h2 class="font-bold text-lg">Recent detections</h2>
+        </div>
+        <span class="text-xs text-muted">newest first · rejected detections excluded</span>
+      </div>
+      <form id="cert-batch" class="flex flex-wrap items-end gap-2 mt-4 text-xs" aria-label="Batch certificate export">
+        <label class="flex flex-col gap-1 font-semibold text-muted">From <input id="cb-start" type="date" class="field !py-1 !text-xs font-normal"></label>
+        <label class="flex flex-col gap-1 font-semibold text-muted">To <input id="cb-end" type="date" class="field !py-1 !text-xs font-normal"></label>
+        <label class="flex flex-col gap-1 font-semibold text-muted">Brand <input id="cb-brand" list="master-brands" maxlength="120" placeholder="all brands" class="field !py-1 !text-xs font-normal"></label>
+        <a id="cb-go" href="/api/certificates/export-batch" class="btn-primary px-3 py-1.5">📦 Export certificates (ZIP)</a>
+      </form>
+      <div class="overflow-x-auto mt-4">
+        <table class="w-full text-sm">
+          <thead class="text-left eyebrow border-b border-line">
+            <tr><th class="py-2 pr-3 font-semibold">#</th><th class="pr-3 font-semibold">Brand · campaign</th><th class="pr-3 font-semibold">Channel</th>
+              <th class="pr-3 font-semibold">Airing</th><th class="pr-3 text-right font-semibold">Conf.</th><th class="pr-3 font-semibold">Integrity</th><th class="font-semibold">PDF</th></tr>
+          </thead>
+          <tbody id="airings-body"></tbody>
+        </table>
+      </div>
+    </section>
+    <footer class="text-xs text-muted mt-6 mb-2">KIHC · data refreshes in place every 3–10 s · API docs at <a class="underline" href="/api/docs">/api/docs</a></footer>
+  </main>
+</div>
 
 
 <!-- ===================== master asset onboarding modal (Phase 16) ===================== -->
-<dialog id="master-modal" class="rounded-bento p-0 w-[min(560px,94vw)] bg-white shadow-2xl">
+<dialog id="master-modal" class="p-0 w-[min(560px,94vw)]">
   <form id="master-form" method="dialog" class="flex flex-col">
-    <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-line/70">
       <div class="font-bold">Upload master asset</div>
-      <button id="master-close" type="button" class="rounded-lg px-2 py-1 hover:bg-gray-100" aria-label="Close"><i data-lucide="x"></i></button>
+      <button id="master-close" type="button" class="rounded-lg px-2 py-1 hover:bg-slate-100" aria-label="Close"><i data-lucide="x"></i></button>
     </div>
     <div class="p-5 flex flex-col gap-3 text-sm">
       <label id="master-drop" for="master-file" tabindex="0"
-             class="block rounded-2xl border-2 border-dashed border-line bg-canvas px-4 py-5 text-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-mint">
+             class="block rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-5 text-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-300">
         <span id="master-drop-text" class="text-muted">Drop a master creative here or click to browse<br><span class="text-xs">.mp4 · .wav · .mp3 · up to 16 MB (larger: use <code>register-ad</code>)</span></span>
         <input id="master-file" type="file" accept=".mp4,.wav,.mp3,video/mp4,audio/wav,audio/mpeg" class="sr-only">
       </label>
-      <canvas id="master-wave" height="64" class="w-full rounded-xl bg-radar hidden" aria-label="Audio waveform preview" role="img"></canvas>
+      <canvas id="master-wave" height="64" class="w-full rounded-xl bg-slate-50 border border-line hidden" aria-label="Audio waveform preview" role="img"></canvas>
       <div id="master-wave-info" class="text-xs text-muted hidden"></div>
       <div class="grid grid-cols-2 gap-3">
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Brand
-          <input id="master-brand" required maxlength="120" list="master-brands" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink" autocomplete="off">
+          <input id="master-brand" required maxlength="120" list="master-brands" class="field !py-1.5 font-normal" autocomplete="off">
           <datalist id="master-brands"></datalist></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Sector
-          <select id="master-sector" required class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink"></select></label>
+          <select id="master-sector" required class="field !py-1.5 font-normal"></select></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Booked position
-          <select id="master-position" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink">
+          <select id="master-position" class="field !py-1.5 font-normal">
             <option value="ANY">None booked</option><option value="FIRST">First in break</option>
             <option value="LAST">Last in break</option><option value="FIRST_OR_LAST">First or last</option></select></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Competitor separation
-          <select id="master-sep" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink">
+          <select id="master-sep" class="field !py-1.5 font-normal">
             <option value="60">60 s</option><option value="120">120 s</option><option value="180" selected>180 s</option>
             <option value="300">300 s</option><option value="600">600 s</option></select></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted col-span-2">Negotiated 30 s rate (DZD, optional)
-          <input id="master-rate" type="number" min="0" step="1000" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink" placeholder="card rate applies"></label>
+          <input id="master-rate" type="number" min="0" step="1000" class="field !py-1.5 font-normal" placeholder="card rate applies"></label>
       </div>
       <div id="master-status" class="min-h-[1.5rem] text-sm" role="status" aria-live="polite"></div>
     </div>
-    <div class="flex justify-end gap-2 px-5 py-3 border-t border-line">
-      <button id="master-submit" type="submit" disabled class="rounded-xl bg-mint text-petrol2 font-bold px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed">Index asset</button>
+    <div class="flex justify-end gap-2 px-5 py-3 border-t border-line/70">
+      <button id="master-submit" type="submit" disabled class="btn-primary px-4 py-2 text-sm">Index asset</button>
     </div>
   </form>
 </dialog>
 
 <!-- ===================== contract ingestion modal (Phase 18) ===================== -->
-<dialog id="contract-modal" class="rounded-bento p-0 w-[min(560px,94vw)] bg-white shadow-2xl">
+<dialog id="contract-modal" class="p-0 w-[min(560px,94vw)]">
   <form id="contract-form" method="dialog" class="flex flex-col">
-    <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-line/70">
       <div class="font-bold">Client contract</div>
-      <button id="contract-close" type="button" class="rounded-lg px-2 py-1 hover:bg-gray-100" aria-label="Close"><i data-lucide="x"></i></button>
+      <button id="contract-close" type="button" class="rounded-lg px-2 py-1 hover:bg-slate-100" aria-label="Close"><i data-lucide="x"></i></button>
     </div>
     <div class="p-5 flex flex-col gap-3 text-sm">
-      <div class="flex rounded-xl border border-line overflow-hidden text-xs font-semibold" role="radiogroup" aria-label="Audit track">
-        <label class="flex-1 px-3 py-2 cursor-pointer text-center has-[:checked]:bg-mint has-[:checked]:text-petrol2"><input type="radio" name="contract-mode" value="manual" class="sr-only" checked>Manual Contract Entry</label>
+      <div class="flex rounded-xl border border-line overflow-hidden text-xs font-semibold bg-white/70" role="radiogroup" aria-label="Audit track">
+        <label class="flex-1 px-3 py-2 cursor-pointer text-center has-[:checked]:bg-indigo-600 has-[:checked]:text-white"><input type="radio" name="contract-mode" value="manual" class="sr-only" checked>Manual Contract Entry</label>
         <label class="flex-1 px-3 py-2 cursor-pointer text-center has-[:checked]:bg-amber-100 has-[:checked]:text-amber-800"><input type="radio" name="contract-mode" value="estimate" class="sr-only">Use Market Estimate Default</label>
       </div>
       <div id="contract-estimate-note" class="hidden rounded-xl bg-amber-50 text-amber-800 px-3 py-2 text-xs">
@@ -365,59 +479,78 @@
         with the default 180 s separation and an illustrative 30 % placement penalty. Nothing is saved.</div>
       <div id="contract-fields" class="grid grid-cols-2 gap-3">
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted col-span-2">Contract ID
-          <input id="contract-id" required maxlength="60" placeholder="CTR-2026-MOB-001" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink" autocomplete="off"></label>
+          <input id="contract-id" required maxlength="60" placeholder="CTR-2026-MOB-001" class="field !py-1.5 font-normal" autocomplete="off"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Brand
-          <input id="contract-brand" required maxlength="120" list="master-brands" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink" autocomplete="off"></label>
+          <input id="contract-brand" required maxlength="120" list="master-brands" class="field !py-1.5 font-normal" autocomplete="off"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Channel
-          <input id="contract-channel" required maxlength="120" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink" autocomplete="off"></label>
+          <input id="contract-channel" required maxlength="120" class="field !py-1.5 font-normal" autocomplete="off"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Net rate (DZD / second)
-          <input id="contract-rate" type="number" required min="0.01" step="any" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink"></label>
+          <input id="contract-rate" type="number" required min="0.01" step="any" class="field !py-1.5 font-normal"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Guaranteed slot
-          <select id="contract-position" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink">
+          <select id="contract-position" class="field !py-1.5 font-normal">
             <option value="RUN_OF_BREAK">Run of break</option><option value="FIRST_IN_POD">First in pod</option>
             <option value="LAST_IN_POD">Last in pod</option><option value="FIRST_OR_LAST">First or last</option></select></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Separation window (s)
-          <input id="contract-sep" type="number" min="0" max="3600" value="180" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink"></label>
+          <input id="contract-sep" type="number" min="0" max="3600" value="180" class="field !py-1.5 font-normal"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Valid from
-          <input id="contract-from" type="date" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink"></label>
+          <input id="contract-from" type="date" class="field !py-1.5 font-normal"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted">Valid to (inclusive)
-          <input id="contract-to" type="date" class="border border-line rounded-lg px-2 py-1.5 text-sm font-normal text-ink"></label>
+          <input id="contract-to" type="date" class="field !py-1.5 font-normal"></label>
         <label class="flex flex-col gap-1 text-xs font-semibold text-muted col-span-2">Contract document (optional: .json · .pdf · .csv · .txt)
           <input id="contract-file" type="file" accept=".json,.pdf,.csv,.txt" class="text-xs font-normal"></label>
       </div>
       <div id="contract-status" class="min-h-[1.5rem] text-sm" role="status" aria-live="polite"></div>
     </div>
-    <div class="flex justify-end gap-2 px-5 py-3 border-t border-line">
-      <button id="contract-submit" type="submit" class="rounded-xl bg-mint text-petrol2 font-bold px-4 py-2 text-sm">Bind contract</button>
+    <div class="flex justify-end gap-2 px-5 py-3 border-t border-line/70">
+      <button id="contract-submit" type="submit" class="btn-primary px-4 py-2 text-sm">Bind contract</button>
     </div>
   </form>
 </dialog>
 
+<!-- ===================== airing certificate modal (frosted glass) ===================== -->
+<dialog id="cert-modal" class="p-0 w-[min(520px,94vw)]">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-line/70">
+    <div class="flex items-center gap-2 font-bold"><span class="ibadge !w-8 !h-8 !rounded-lg bg-indigo-100 text-indigo-600"><i data-lucide="shield-check"></i></span>Airing certificate</div>
+    <button id="cert-modal-close" type="button" class="rounded-lg px-2 py-1 hover:bg-slate-100" aria-label="Close"><i data-lucide="x"></i></button>
+  </div>
+  <div class="p-5 flex flex-col gap-3 text-sm">
+    <div id="cert-modal-title" class="text-lg font-bold leading-snug">—</div>
+    <div id="cert-modal-meta" class="text-xs text-muted"></div>
+    <div class="flex flex-wrap gap-2"><span id="cert-modal-integrity" class="pill bg-slate-100 text-slate-600">—</span><span id="cert-modal-conf" class="pill bg-emerald-50 text-emerald-700">—</span></div>
+    <div><div class="eyebrow mb-1">SHA-256 seal</div>
+      <code id="cert-modal-hash" class="block rounded-xl bg-white/70 border border-line/80 px-3 py-2 text-[11px] break-all text-slate-600">—</code></div>
+  </div>
+  <div class="flex flex-wrap justify-end gap-2 px-5 py-3 border-t border-line/70">
+    <span id="cert-modal-evidence" class="mr-auto self-center"></span>
+    <a id="cert-modal-download" href="#" class="btn-primary px-4 py-2 text-sm flex items-center gap-2"><i data-lucide="file-down"></i>Download PDF</a>
+  </div>
+</dialog>
+
 <!-- ===================== breach evidence player (Phase 19) ===================== -->
-<dialog id="evidence-modal" class="rounded-bento p-0 w-[min(520px,94vw)] bg-white shadow-2xl">
-  <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+<dialog id="evidence-modal" class="p-0 w-[min(520px,94vw)]">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-line/70">
     <div id="evidence-title" class="font-bold">Breach evidence</div>
-    <button id="evidence-close" type="button" class="rounded-lg px-2 py-1 hover:bg-gray-100" aria-label="Close"><i data-lucide="x"></i></button>
+    <button id="evidence-close" type="button" class="rounded-lg px-2 py-1 hover:bg-slate-100" aria-label="Close"><i data-lucide="x"></i></button>
   </div>
   <div class="p-5 flex flex-col gap-3 text-sm">
     <audio id="evidence-audio" controls preload="metadata" class="w-full"></audio>
     <div class="text-xs text-muted">Audio clip: airing &minus;3 s to +3 s, extracted when the breach was flagged. The SHA-256 below is re-verified on every play and download.</div>
     <code id="evidence-hash" class="text-[11px] break-all"></code>
-    <div id="evidence-error" class="text-xs text-red-700" role="alert"></div>
+    <div id="evidence-error" class="text-xs text-rose-700" role="alert"></div>
   </div>
-  <div class="flex justify-end gap-2 px-5 py-3 border-t border-line">
-    <a id="evidence-download" class="rounded-xl bg-mint text-petrol2 font-bold px-4 py-2 text-sm" href="#">&#11015;&#65039; Download Clip</a>
+  <div class="flex justify-end gap-2 px-5 py-3 border-t border-line/70">
+    <a id="evidence-download" class="btn-primary px-4 py-2 text-sm" href="#">&#11015;&#65039; Download Clip</a>
   </div>
 </dialog>
 
 <!-- ===================== video preview modal ===================== -->
-<dialog id="preview-modal" class="rounded-bento p-0 w-[min(760px,94vw)] bg-white shadow-2xl">
-  <div class="flex items-center justify-between px-5 py-3 border-b border-line">
+<dialog id="preview-modal" class="p-0 w-[min(760px,94vw)] overflow-hidden">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-line/70">
     <div class="font-bold" id="preview-title">Live preview</div>
-    <button id="preview-close" type="button" class="rounded-lg px-2 py-1 hover:bg-gray-100" aria-label="Close preview"><i data-lucide="x"></i></button>
+    <button id="preview-close" type="button" class="rounded-lg px-2 py-1 hover:bg-slate-100" aria-label="Close preview"><i data-lucide="x"></i></button>
   </div>
   <!-- sandbox without allow-same-origin: the player runs in an opaque origin and cannot call this API -->
-  <iframe id="preview-frame" title="Live video preview" class="w-full aspect-video block" src="about:blank"
+  <iframe id="preview-frame" title="Live video preview" class="w-full aspect-video block bg-slate-100" src="about:blank"
           sandbox="allow-scripts allow-presentation allow-popups" referrerpolicy="no-referrer"></iframe>
   <p class="text-xs text-muted px-5 py-3">Client-side preview only · the in-memory audio engine operates independently.</p>
 </dialog>

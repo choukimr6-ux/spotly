@@ -175,3 +175,104 @@ def test_idle_writer_exits_and_restarts_on_next_submit(db):
     with get_db(db) as conn:
         assert conn.execute("SELECT match_count FROM reference_signatures WHERE asset_id='A0'").fetchone()[0] == 2
     q.close()
+
+
+def test_phase30_ledger_stays_lock_free_under_10hz_telemetry_and_dashboard_polling(db, capsys):
+    """10 channels x 100 airings through the queue WHILE 10 Hz heartbeat/status writes and the 8502 API polls run:
+    zero 'database is locked', every airing persisted with a distinct id, and no transient table inside the ledger."""
+    import json
+    import os
+    from fastapi.testclient import TestClient
+    from kihc.app.api_server import create_app
+    from kihc.database import telemetry_store
+
+    errors, tickets, tlock = [], [], threading.Lock()
+    stop = threading.Event()
+    counts = dict(telemetry=0, polls=0, ro_polls=0)
+
+    def telemetry():                                   # the supervisor: 10 Hz, heartbeat + one status row per channel
+        conn = telemetry_store.connect(db)
+        try:
+            while not stop.is_set():
+                try:
+                    with conn:
+                        conn.execute("INSERT INTO service_heartbeat (service_id, pid, state, heartbeat_epoch, channels) "
+                                     "VALUES (1, ?, 'running', ?, ?) ON CONFLICT(service_id) DO UPDATE SET "
+                                     "heartbeat_epoch=excluded.heartbeat_epoch", (os.getpid(), time.time(), CHANNELS))
+                        conn.executemany(
+                            "INSERT INTO service_channel_status (channel, state, updated_epoch, restarts, status_json, owner_pid) "
+                            "VALUES (?, 'listening', ?, 0, ?, ?) ON CONFLICT(channel) DO UPDATE SET "
+                            "updated_epoch=excluded.updated_epoch, status_json=excluded.status_json",
+                            [(f"Ch{c}", time.time(), json.dumps(dict(level_dbfs=-20.0, level_history=[-20.0] * 150)), os.getpid())
+                             for c in range(CHANNELS)])
+                    counts["telemetry"] += 1
+                except Exception as exc:
+                    errors.append(("telemetry", exc))
+                time.sleep(0.1)
+        finally:
+            conn.close()
+
+    def poller():                                      # the dashboard: telemetry + historical reads (mode=ro)
+        with TestClient(create_app(db)) as client:
+            while not stop.is_set():
+                try:
+                    r = client.get("/api/telemetry")
+                    assert r.status_code == 200, r.text
+                    counts["polls"] += 1
+                    for url in ("/api/airings?limit=50&verify=false", "/api/stats"):
+                        r = client.get(url)
+                        assert r.status_code == 200, (url, r.text[:200])
+                        counts["ro_polls"] += 1
+                except Exception as exc:
+                    errors.append(("poll", exc))
+                time.sleep(0.05)
+
+    def channel(ch, barrier):
+        barrier.wait()
+        for n in range(PER_CHANNEL):
+            try:
+                t = rdb.submit_airing(db, **_fields(ch, n))
+                with tlock:
+                    tickets.append(t)
+            except Exception as exc:
+                errors.append(("producer", exc))
+
+    barrier = threading.Barrier(CHANNELS)
+    bg = [threading.Thread(target=telemetry), threading.Thread(target=poller)]
+    [t.start() for t in bg]
+    producers = [threading.Thread(target=channel, args=(c, barrier)) for c in range(CHANNELS)]
+    t0 = time.perf_counter()
+    [t.start() for t in producers]
+    [t.join() for t in producers]
+    assert dq.get_queue(db).flush(90)
+    elapsed = time.perf_counter() - t0
+    time.sleep(max(0.5, 4.0 - elapsed))                 # keep the background load running for a fixed minimum window
+    stop.set()
+    [t.join() for t in bg]
+
+    ids = [t.result() for t in tickets]
+    assert not errors, errors[:3]
+    assert not [e for e in errors if "locked" in str(e)]
+    assert len(ids) == CHANNELS * PER_CHANNEL and len(set(ids)) == len(ids) and all(isinstance(i, int) for i in ids)
+    with get_db(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ad_occurrences").fetchone()[0] == CHANNELS * PER_CHANNEL
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert not tables & {"service_heartbeat", "service_channel_status"}          # ledger purity
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15000
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1                 # NORMAL
+    assert counts["telemetry"] >= 20 and counts["polls"] >= 3 and counts["ro_polls"] >= 6
+    with capsys.disabled():
+        print(f"\n[PHASE30] {len(ids)} airings / {elapsed:.1f} s, {counts['telemetry']} telemetry ticks (10 Hz target), "
+              f"{counts['polls']} /api/telemetry + {counts['ro_polls']} read-only polls, 0 lock errors")
+
+
+def test_readonly_dashboard_connections_cannot_write_the_ledger(db):
+    from kihc.database.schema import read_only
+    with read_only():
+        with get_db(db) as conn:
+            assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                conn.execute("DELETE FROM ad_occurrences")
+    with get_db(db) as conn:                                                       # outside the block: normal read-write again
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 0

@@ -28,6 +28,7 @@ browser cannot drive it (cross-site POST / CSRF). Put an authenticating reverse 
 exposing it on a network.
 """
 import argparse
+import functools
 import logging
 import re
 import threading
@@ -48,6 +49,7 @@ from kihc.core.discovery import DISCOVERED_DIR, ignore_asset, promote_asset
 from kihc.core.discovery_report import discovered_airings, list_assets
 
 from kihc.analytics import compliance_audit as ca
+from kihc.database.schema import get_db, read_only
 from kihc.analytics.financial_intelligence import (build_financial_market_report,
                                                    jsonable, report_csv)
 from kihc.app import overview as ov
@@ -165,6 +167,15 @@ def _stream_ref(worker):
     return src if isinstance(src, str) else getattr(src, "__name__", None)
 
 
+def _ro(fn):
+    """Historical dashboard reads: the ledger is opened `mode=ro` + `query_only`, so a poll can never take the write lock."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with read_only():
+            return fn(*args, **kwargs)
+    return run
+
+
 def _slim_status(name: str, s: dict, source: str, stream_ref=None, restarts=None) -> dict:
     keys = ("state", "level_dbfs", "peak_dbfs_10s", "silent", "connected_for_s", "disconnects_last_hour",
             "buffered_seconds", "received_seconds", "detections", "references", "connect_attempts",
@@ -197,6 +208,12 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
     app = FastAPI(title="KIHC Broadcast Intelligence", version="7.0", lifespan=lifespan,
                   docs_url="/api/docs", redoc_url=None)
     app.state.db_path = db_path
+    try:                                           # read-only endpoints (Phase 30) cannot create tables: do it once, here
+        from kihc.data import reference_db as _rdb
+        with get_db(db_path) as _conn:
+            _rdb.ensure_schema(_conn)
+    except Exception:
+        log.exception("reference schema check failed")
     app.state.audio_root = DISCOVERED_DIR          # discovered-asset audio is served only from here
     app.state.workers = {}
     app.state.lock = threading.Lock()
@@ -227,6 +244,7 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
 
     # ------------------------------------------------------------ data
     @app.get("/api/stats")
+    @_ro
     def stats(industry: str | None = Query(None, description="industry for Share of Voice; default = busiest"),
               days: int = Query(14, ge=1, le=90)):
         out = ov.overview(app.state.db_path, industry if industry else "__auto__", days)
@@ -255,11 +273,13 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
                              sov_pct=top["sov_pct"]) if top else None))
 
     @app.get("/api/financials/overview")
+    @_ro
     def financials_overview(start: str | None = None, end: str | None = None, industry: str | None = None,
                             verified_only: bool = False):
         return _financial_overview(_report(start, end, industry, verified_only))
 
     @app.get("/api/financials/brands")
+    @_ro
     def financials_brands(start: str | None = None, end: str | None = None, industry: str | None = None,
                           verified_only: bool = False):
         rep = _report(start, end, industry, verified_only)
@@ -408,6 +428,7 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
                 raise HTTPException(422, str(exc))
 
     @app.get("/api/campaigns/families")
+    @_ro
     def campaign_families(days: int | None = Query(None, ge=1, le=365)):
         """Parent-campaign rollup: airings / airtime / SOV per campaign with each cut-down variant listed under it."""
         import time as _t
@@ -431,6 +452,7 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
         return {"ad_id": ad_id, "sector": req.sector.strip()}
 
     @app.get("/api/ads")
+    @_ro
     def ads():
         from kihc.database.schema import get_db
         with get_db(app.state.db_path) as conn:
@@ -444,6 +466,7 @@ def create_app(db_path=None, worker_factory=None, channel_loader=None, on_shutdo
         return {"ads": rows}
 
     @app.get("/api/airings")
+    @_ro
     def airings(limit: int = Query(25, ge=1, le=200), verify: bool = Query(True)):
         rows = ov.load_airings(app.state.db_path)[:limit]
         from kihc.database.schema import get_db

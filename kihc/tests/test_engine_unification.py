@@ -123,6 +123,7 @@ def test_a_huge_backlog_push_keeps_transient_memory_bounded():
 
 
 # ------------------------------------------------------------------------------------------ telemetry truth
+from kihc.database import telemetry_store                                             # noqa: E402
 from kihc.database.schema import init_db                                             # noqa: E402
 from kihc.service import headless_runner as hr                                       # noqa: E402
 from kihc.service.lock import ProcessLock, service_paths                             # noqa: E402
@@ -139,7 +140,7 @@ def _seed_engine(db, rows, pid=None):
     """A running engine (heartbeat now, lock held by this test) plus raw channel rows: (name, age_s, owner_pid)."""
     pid = pid or __import__("os").getpid()
     now = time.time()
-    conn = init_db(db)
+    conn = telemetry_store.connect(db)
     try:
         with conn:
             conn.execute("INSERT OR REPLACE INTO service_heartbeat (service_id, pid, hostname, state, started_at, heartbeat_at, "
@@ -202,7 +203,7 @@ def test_a_retrying_channel_with_a_fresh_row_is_stalled_not_live(engine_db):
     rows = {"Retry TV": _status_json(buffered=0.0, audio_age=400.0),        # retry loop: nothing buffered, last chunk long ago
             "Dry TV": _status_json(buffered=30.0, audio_age=400.0),         # ring not yet drained but no chunk for 400 s
             "Late TV": _status_json(buffered=30.0, audio_age=16.0)}         # just past the 15 s freshness window
-    conn = sqlite3.connect(engine_db)
+    conn = telemetry_store.connect(engine_db)
     with conn:
         for name, js in rows.items():
             conn.execute("UPDATE service_channel_status SET status_json = ? WHERE channel = ?", (js, name))
@@ -253,7 +254,7 @@ def test_supervisor_startup_purges_rows_a_previous_process_left_behind(tmp_path)
     sup = hr.Supervisor([hr.ChannelSpec("Only TV", "x")], db, worker_factory=_IdleWorker)
     sup.start()
     try:
-        conn = init_db(db)
+        conn = telemetry_store.connect(db)
         names = {r[0] for r in conn.execute("SELECT channel FROM service_channel_status")}
         conn.close()
         assert names == set(), "phantom rows survived the startup purge"
@@ -527,3 +528,35 @@ def test_pilot_channel_list_syntax():
     assert split_channels("a,b, c,a") == ["a", "b", "c"]
     assert split_channels("Canal=http://h/x.m3u8?a=1,2") == ["Canal=http://h/x.m3u8?a=1,2"]          # one 'Name=URL'
     assert split_channels("Canal=http://h/x.m3u8?a=1,2;elheddaf") == ["Canal=http://h/x.m3u8?a=1,2", "elheddaf"]
+
+
+def test_stalled_channel_never_leaves_an_ffmpeg_orphan_and_backs_off(tmp_path):
+    """Phase 30: a frozen upstream (child alive, no audio) is killed at the stall timeout; during the back-off there is NO
+    child process for the channel, the delay escalates, and stopping the fleet leaves nothing behind."""
+    import psutil
+    from kihc.ingest.fleet import Inbox
+    fleet = FleetIngest(dict(stall_timeout_sec=0.6, backoff_base_sec=0.4, backoff_max_sec=3.0, unresolved_retry_sec=0.3))
+    fleet.manager.command_builder = lambda url, ch: [sys.executable, "-c", "import time; time.sleep(120)"]
+    fleet.start()
+    spawned, in_backoff_with_child, delays = set(), 0, []
+    try:
+        fleet.attach("dead_tv", "Dead TV", "fake://dead", Inbox())
+        t_end = time.time() + 9
+        while time.time() < t_end:
+            st = fleet.stat("dead_tv")
+            if st is not None and st.pid:
+                spawned.add(st.pid)
+                assert len([p for p in psutil.Process().children(recursive=True) if p.pid in spawned and p.is_running()]) <= 1
+            if st is not None and st.state == "backoff":
+                if st.pid:
+                    in_backoff_with_child += 1
+                if st.next_retry_in:
+                    delays.append(round(st.next_retry_in, 1))
+            time.sleep(0.05)
+        assert len(spawned) >= 2                                     # it did retry
+        assert in_backoff_with_child == 0                            # ...and never kept a child while backing off
+        assert max(delays) > min(delays)                             # the back-off escalates (0.4 s -> ... -> cap)
+    finally:
+        fleet.stop()
+    alive = [p for p in psutil.Process().children(recursive=True) if p.pid in spawned]
+    assert not alive, alive

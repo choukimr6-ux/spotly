@@ -115,7 +115,7 @@ class FleetIngest:
 
     def __init__(self, settings: dict | None = None):
         cfg = dict(sample_rate=LIVE_SAMPLE_RATE, segment_seconds=SEGMENT_SECONDS, queue_max_segments=600,
-                   stall_timeout_sec=20.0, backoff_base_sec=5.0, backoff_max_sec=30.0, healthy_after_sec=30.0,
+                   stall_timeout_sec=20.0, backoff_base_sec=5.0, backoff_max_sec=120.0, healthy_after_sec=30.0,
                    unresolved_retry_sec=30.0, max_active=64, resolve_timeout_sec=30.0)
         cfg.update(settings or {})
         catalogue = msm.Catalogue({}, {**msm.DEFAULTS, **cfg}, ())

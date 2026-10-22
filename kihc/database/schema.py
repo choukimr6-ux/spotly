@@ -3,6 +3,7 @@
 Occurrence rows record *detected airings* only (source, timestamps, confidence).
 They are not audience impressions and must never be reported as such.
 """
+import contextvars
 import os
 import sqlite3
 import threading
@@ -40,25 +41,7 @@ CREATE TABLE IF NOT EXISTS ad_occurrences (
 CREATE INDEX IF NOT EXISTS idx_occ_ad ON ad_occurrences(ad_id);
 CREATE INDEX IF NOT EXISTS idx_occ_source ON ad_occurrences(source_name, airing_start);
 
--- Background service telemetry (Phase 3.5). Operational state only; no detection data lives here.
-CREATE TABLE IF NOT EXISTS service_heartbeat (
-    service_id      INTEGER PRIMARY KEY CHECK (service_id = 1),   -- single row
-    pid             INTEGER,
-    hostname        TEXT,
-    state           TEXT,          -- starting | running | stopping | stopped
-    started_at      TEXT,
-    heartbeat_at    TEXT,
-    heartbeat_epoch REAL,
-    tick_seconds    REAL,
-    rss_mb          REAL,
-    peak_rss_mb     REAL,
-    ffmpeg_rss_mb   REAL,
-    channels        INTEGER,
-    restarts        INTEGER,
-    gc_runs         INTEGER,
-    last_gc_at      TEXT,
-    message         TEXT
-);
+-- (service_heartbeat / service_channel_status live in kihc_telemetry.db since Phase 30: see kihc/database/telemetry_store.py)
 
 -- Unsupervised discovery (Phase 11): recurring audio segments found without reference files.
 -- 'unclassified' assets may be ads, promos, idents or programme openers; they enter spend
@@ -131,13 +114,6 @@ CREATE TABLE IF NOT EXISTS rate_card_overrides (
     updated_at  TEXT
 );
 
-CREATE TABLE IF NOT EXISTS service_channel_status (
-    channel         TEXT PRIMARY KEY,
-    state           TEXT,
-    updated_epoch   REAL,
-    restarts        INTEGER,
-    status_json     TEXT           -- LiveStreamWorker.status() snapshot (radar telemetry)
-);
 -- Phase 18: dual-track contract matrix. A row here makes matching airings 'VERIFIED_CONTRACT_AUDIT' (Track A);
 -- airings without a matching ACTIVE contract stay 'ILLUSTRATIVE_MARKET_ESTIMATE' (Track B, public rate cards).
 CREATE TABLE IF NOT EXISTS client_contracts (
@@ -184,6 +160,28 @@ BUSY_TIMEOUT_MS = 15_000          # wait up to 15 s for a lock instead of failin
 # path -> (inode, ctime) of the file whose schema this process already initialised
 _INITIALISED: dict[str, tuple] = {}
 _INIT_LOCK = threading.Lock()
+
+
+_READ_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("kihc_read_only", default=False)
+
+
+@contextmanager
+def read_only():
+    """Every get_db/init_db inside this block (this thread / task only) opens the ledger `mode=ro` with `query_only = ON`:
+    a dashboard read path can neither take the write lock nor mutate evidence, whatever code it calls."""
+    token = _READ_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _READ_ONLY.reset(token)
+
+
+def _connect_ro(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def connect(db_path=None) -> sqlite3.Connection:
@@ -261,14 +259,18 @@ MIGRATIONS = [
     # Phase 29: the SHA-256 of the 11 025 Hz audio clip written at confirmation, chained into verification_hash (NULL = the
     # row was sealed before clips were persisted, or no audio was buffered); and which process owns a channel-status row
     ("ad_occurrences", "seal_clip_sha256", "TEXT"),
-    ("service_channel_status", "owner_pid", "INTEGER"),
     # Phase 29.2: 'UNAVAILABLE_LEGACY' = no clip exists and none can ever be cut (the in-RAM ring is gone): never retried
     ("ad_occurrences", "evidence_status", "TEXT"),
 ]
 AD_TYPES = ("self", "competitor")
 
 
+LEGACY_TELEMETRY_TABLES = ("service_heartbeat", "service_channel_status")      # moved out of the ledger in Phase 30
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    for table in LEGACY_TELEMETRY_TABLES:         # operational state only (never evidence): the ledger holds no transient rows
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
     for table, column, ctype in MIGRATIONS:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
@@ -294,6 +296,14 @@ def init_db(db_path=None) -> sqlite3.Connection:
     memory = str(path) == ":memory:"
     key = str(path) if memory else os.path.realpath(path)
     ident = None if memory else _file_identity(path)
+    if _READ_ONLY.get() and not memory:
+        if ident is None or _INITIALISED.get(key) != ident:      # first touch in this process: schema work needs a writer, once
+            token = _READ_ONLY.set(False)
+            try:
+                init_db(path).close()
+            finally:
+                _READ_ONLY.reset(token)
+        return _connect_ro(path)
     conn = connect(path)
     if memory or ident is None or _INITIALISED.get(key) != ident:
         with _INIT_LOCK:

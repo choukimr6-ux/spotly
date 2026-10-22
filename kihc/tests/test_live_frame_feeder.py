@@ -9,6 +9,7 @@ import pytest
 
 from kihc.analytics import pod_boundary_detector as pbd
 from kihc.core.pod_analyzer import PHYSICAL_STATUS
+from kihc.database import telemetry_store
 from kihc.database.schema import get_db
 from kihc.service.headless_runner import ChannelSpec, Supervisor
 from kihc.stream import elheddaf_stream as hs
@@ -171,8 +172,11 @@ def test_video_status_rides_on_the_channel_telemetry(tmp_path):
     ing.stop()
     sup.workers, sup.frame_ingests = {CH: Worker()}, {CH: ing}
     sup._write_channels()
-    with get_db(db) as conn:
+    conn = telemetry_store.connect(db)
+    try:
         status = json.loads(conn.execute("SELECT status_json FROM service_channel_status").fetchone()[0])
+    finally:
+        conn.close()
     assert status["video"]["frames_read"] == 30 and status["video"]["sensing"]["video_frames"] > 0
 
 

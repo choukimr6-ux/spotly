@@ -105,6 +105,8 @@ def unpack_blob(blob: bytes):
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    if conn.execute("PRAGMA query_only").fetchone()[0]:      # Phase 30 read-only dashboard connection: the writer ensured it
+        return
     conn.executescript(DDL)
     if "ad_id" not in {r[1] for r in conn.execute("PRAGMA table_info(reference_signatures)")}:
         conn.execute("ALTER TABLE reference_signatures ADD COLUMN ad_id INTEGER")       # tables from Phase 13.1

@@ -33,7 +33,7 @@ from typing import Callable
 from kihc.config import DATA_DIR, DEFAULT_DB_PATH, EVIDENCE_DIR
 from kihc.core.live_worker import LiveStreamWorker
 from kihc.ingest.fleet import FleetIngest, channel_slug
-from kihc.database.schema import init_db
+from kihc.database import telemetry_store
 from kihc.service.lock import ProcessLock, service_paths
 from kihc.service.sysinfo import memory_mb
 
@@ -348,8 +348,9 @@ class Supervisor:
              sum(self.restarts.values()), self.gc_runs, self.last_gc_at, message)))
 
     def _db(self, fn):
+        """Telemetry write: the separate kihc_telemetry.db (Phase 30), never the forensic ledger."""
         try:
-            conn = init_db(self.db_path)
+            conn = telemetry_store.connect(self.db_path)
             try:
                 with conn:
                     fn(conn)
@@ -365,7 +366,7 @@ def read_service_status(db_path=None, stale_after: float | None = None) -> dict 
     """Heartbeat + channel telemetry, with `active` = lock held AND heartbeat fresh."""
     from kihc.service.lock import is_locked
     db_path = str(db_path or DEFAULT_DB_PATH)
-    conn = init_db(db_path)
+    conn = telemetry_store.connect(db_path)
     try:
         hb = conn.execute("SELECT * FROM service_heartbeat WHERE service_id = 1").fetchone()
         chans = conn.execute("SELECT * FROM service_channel_status ORDER BY channel").fetchall()

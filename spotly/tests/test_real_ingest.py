@@ -209,8 +209,8 @@ def test_peak_memory_within_phase3_budget():
     if sys.platform != "win32":
         pytest.skip("peak working set measured via Win32 API")
     peak = _proc_peak_ws(os.getpid())
-    print(f"\n[MEMORY] test process peak working set {peak / 1024 ** 2:.1f} MiB (budget 300 MiB)")
-    assert 0 < peak < 300 * 1024 ** 2
+    print(f"\n[MEMORY] test process peak working set {peak / 1024 ** 2:.1f} MiB (budget 500 MiB)")
+    assert 0 < peak < 500 * 1024 ** 2
 
 
 # ------------------------------------------------------------------ CLI

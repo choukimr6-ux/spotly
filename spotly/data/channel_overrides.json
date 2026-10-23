@@ -1,0 +1,50 @@
+{
+  "echorouk_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/400.m3u8"
+  },
+  "echorouk_news": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/411.m3u8"
+  },
+  "ennahar_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/262.m3u8"
+  },
+  "samira_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/408.m3u8"
+  },
+  "el_bilad_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/282.m3u8"
+  },
+  "el_hayat_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/3232.m3u8"
+  },
+  "al24_news": {
+    "stream_url": "https://cdn.live.easybroadcast.io/abr_corp/66_al24_u4yga6h/corp/66_al24_u4yga6h_240p/chunks.m3u8"
+  },
+  "bahia_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/403.m3u8"
+  },
+  "tv3_algerie3": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/406.m3u8"
+  },
+  "tv4_tamazight": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/259.m3u8"
+  },
+  "tv5_coran": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/1141.m3u8"
+  },
+  "tv6_jeunesse": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/404.m3u8"
+  },
+  "tv7_el_maarifa": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/783.m3u8"
+  },
+  "tv8_edhakira": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/774.m3u8"
+  },
+  "tv9_parlementaire": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/278.m3u8"
+  },
+  "berbere_tv": {
+    "stream_url": "http://bo.myirtv.biz:8080/live/317233112086208395/3704269169829786/421.m3u8"
+  }
+}

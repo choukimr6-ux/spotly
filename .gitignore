@@ -13,3 +13,15 @@ spotly/data/backups/
 spotly/data/state/
 spotly/data/iptv_cache/
 spotly/data/discovered_ads/
+# General DBs & Root Keys
+*.db*
+*.sqlite3
+*.key
+pilot.pid
+
+# Deploy Archives & Build Artifacts
+spotly-deploy.tar.gz
+spotly.b64
+*.egg-info/
+dist/
+build/
